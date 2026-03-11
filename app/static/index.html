@@ -43,11 +43,12 @@
     .modal-close:hover { color: var(--text); }
     .modal-body { padding: 1rem 1.25rem; overflow-y: auto; }
     .modal-body h3 { font-size: 0.9rem; color: var(--muted); margin: 0 0 0.5rem 0; }
-    .stat-row { padding: 0.6rem 0; border-bottom: 1px solid #2d323a; cursor: pointer; border-radius: 6px; margin-bottom: 2px; }
+    .modal-stats-list-wrap { max-height: 120px; overflow-y: auto; overflow-x: hidden; margin-bottom: 0.75rem; flex-shrink: 0; }
+    .modal-stats-list { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .stat-row { padding: 0.35rem 0.5rem; border: 1px solid #2d323a; cursor: pointer; border-radius: 6px; flex-shrink: 0; }
     .stat-row:hover { background: #2d323a; }
     .stat-row.selected { background: rgba(91, 141, 239, 0.2); border-color: var(--accent); }
-    .stat-name { font-weight: 500; }
-    .stat-lines { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
+    .stat-name { font-weight: 500; font-size: 0.8rem; }
     .stat-detail { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #2d323a; }
     .odds-types { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
     .odds-tag { padding: 0.25rem 0.5rem; border-radius: 4px; background: #3a3f48; font-size: 0.85rem; cursor: pointer; }
@@ -176,13 +177,15 @@
         <button type="button" class="modal-close" id="modalClose" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
+        <p id="modalStatus">Loading...</p>
+        <div class="modal-stats-list-wrap" id="modalStatsListWrap" style="display: none;">
+          <div id="modalStatsList" class="modal-stats-list"></div>
+        </div>
         <div class="chart-wrap" id="modalChartWrap" style="display: none;">
           <div class="chart-title" id="chartStatName"></div>
           <div class="chart-bars" id="chartBars"></div>
           <div class="chart-legend" id="chartLegend"></div>
         </div>
-        <p id="modalStatus">Loading...</p>
-        <div id="modalStatsList" style="display: none;"></div>
         <div id="modalStatDetail" class="stat-detail" style="display: none;">
           <h3>Odds types</h3>
           <div class="odds-types" id="modalOddsTypes"></div>
@@ -313,7 +316,7 @@
       const statDetail = document.getElementById('modalStatDetail');
       title.textContent = playerName;
       document.getElementById('modalChartWrap').style.display = 'none';
-      statsList.style.display = 'none';
+      document.getElementById('modalStatsListWrap').style.display = 'none';
       statDetail.style.display = 'none';
       status.style.display = 'block';
       status.textContent = 'Loading...';
@@ -329,8 +332,8 @@
         if (!res.ok) throw new Error(await res.text());
         const list = await res.json();
         status.style.display = 'none';
+        document.getElementById('modalStatsListWrap').style.display = 'block';
         document.getElementById('modalChartWrap').style.display = 'block';
-        statsList.style.display = 'block';
         statDetail.style.display = 'block';
 
         var byStat = {};
@@ -350,12 +353,7 @@
         });
 
         statsList.innerHTML = stats.map(function (stat) {
-          var rows = byStat[stat];
-          var lines = rows.map(function (r) { return (r.odds_type || 'standard') + ' ' + (r.line_score != null ? Number(r.line_score) : ''); }).join(', ');
-          return '<div class="stat-row" data-stat="' + escapeHtml(stat) + '">' +
-            '<div class="stat-name">' + escapeHtml(stat) + '</div>' +
-            '<div class="stat-lines">' + escapeHtml(lines) + '</div>' +
-            '</div>';
+          return '<div class="stat-row" data-stat="' + escapeHtml(stat) + '"><span class="stat-name">' + escapeHtml(stat) + '</span></div>';
         }).join('');
 
         statsList.querySelectorAll('.stat-row').forEach(function (el) {
