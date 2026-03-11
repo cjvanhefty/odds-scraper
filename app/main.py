@@ -101,17 +101,25 @@ if STATIC_DIR.exists():
 def list_projections(
     stat_type: str | None = Query(None, description="Filter by stat type (e.g. Points, Rebounds)"),
     streak_games: int = Query(5, ge=1, le=20, description="Number of games for over-streak / risk"),
-    league_id: int = Query(7, description="PrizePicks league_id (7 = NBA)"),
+    league_id: int = Query(7, description="PrizePicks league_id (7 = NBA). Ignored if league_ids is set."),
+    league_ids: str | None = Query(None, description="Comma-separated PrizePicks league_ids (e.g. 7,9,82 for NBA, NFL, Soccer)"),
     include_all_odds: bool = Query(False, description="Include all odds types (standard, demon, goblin) for modals"),
     player_name: str | None = Query(None, description="Filter to one player (e.g. for modal)"),
 ):
     """Return PrizePicks projections with favored/risk from last N games."""
     conn = None
     try:
+        if league_ids and league_ids.strip():
+            try:
+                league_id_list = [int(x.strip()) for x in league_ids.split(",") if x.strip()]
+            except ValueError:
+                league_id_list = [7]
+        else:
+            league_id_list = [league_id]
         conn = get_conn()
         projections = get_projections(
             conn,
-            league_id=league_id,
+            league_id=league_id_list,
             odds_type=None if include_all_odds else "standard",
         )
         if stat_type and stat_type.strip():
@@ -147,9 +155,35 @@ def list_projections(
             conn.close()
 
 
+@app.get("/api/projections/last-updated")
+def get_projections_last_updated():
+    """Return the most recent last_modified_at for PrizePicks projections (when they were last updated)."""
+    conn = None
+    try:
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MAX(last_modified_at) AS last_updated FROM [dbo].[prizepicks_projection]"
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if row and row[0] is not None:
+            # Return ISO format for the frontend
+            val = row[0]
+            if hasattr(val, "isoformat"):
+                return {"last_updated": val.isoformat()}
+            return {"last_updated": str(val)}
+        return {"last_updated": None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.post("/api/update/projections")
 def update_projections():
-    """Run prizepicks_scraper.py -l nba --db (same as CLI). Uses same DB auth as NBA stats."""
+    """Run prizepicks_scraper.py --all-leagues --db to fetch all sports. Uses same DB auth as NBA stats."""
     env = os.environ.copy()
     server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
     user = env.get("PROPS_DB_USER", "dbadmin")
@@ -159,7 +193,7 @@ def update_projections():
     cmd = [
         sys.executable,
         str(REPO_ROOT / "prizepicks_scraper.py"),
-        "-l", "nba",
+        "--all-leagues",
         "--db",
         "--db-server", server,
         "--db-user", user,
@@ -175,7 +209,7 @@ def update_projections():
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
-            timeout=180 if use_browser else 120,
+            timeout=300 if use_browser else 180,
             env=env,
         )
         if result.returncode != 0:

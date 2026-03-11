@@ -79,9 +79,25 @@
   <h1>PrizePicks Projections</h1>
 
   <div class="section">
+    <h2>Sport (PrizePicks)</h2>
+    <div class="controls" id="sportFilters">
+      <label><input type="checkbox" name="sport" value="7" id="sportNba" checked /> NBA</label>
+      <label><input type="checkbox" name="sport" value="9" id="sportFootball" /> Football</label>
+      <label><input type="checkbox" name="sport" value="82" id="sportSoccer" /> Soccer</label>
+      <label><input type="checkbox" name="sport" value="8" /> NHL</label>
+      <label><input type="checkbox" name="sport" value="2" /> MLB</label>
+      <label><input type="checkbox" name="sport" value="15" /> CFB</label>
+      <label><input type="checkbox" name="sport" value="20" /> CBB</label>
+      <label><input type="checkbox" name="sport" value="14" /> EPL</label>
+    </div>
+    <p class="muted" style="font-size: 0.85rem; margin: 0.25rem 0 0 0;">Only projections for the selected sports appear in the table below.</p>
+  </div>
+
+  <div class="section">
     <h2>Update data</h2>
     <div class="controls">
       <button type="button" class="btn" id="btnUpdateProjections">Update PrizePicks</button>
+      <span id="lastUpdatedWrap" class="muted" style="margin-left: 0.75rem; font-size: 0.9rem;">Last updated: <span id="lastUpdatedText">—</span></span>
       <button type="button" class="btn secondary" id="btnUpdateUnderdog">Update Underdog</button>
       <button type="button" class="btn secondary" id="btnUpdateParlayPlay">Update Parlay Play</button>
       <span style="margin-left: 1rem;"></span>
@@ -169,12 +185,20 @@
     const API = '';
     let currentProjections = [];
 
+    function getSelectedLeagueIds() {
+      const checkboxes = document.querySelectorAll('input[name="sport"]:checked');
+      if (checkboxes.length === 0) return [7];
+      return Array.from(checkboxes).map(function (cb) { return cb.value; });
+    }
+
     function getParams() {
       const stat = document.getElementById('statType').value;
       const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
+      const leagueIds = getSelectedLeagueIds();
       const params = new URLSearchParams();
       if (stat) params.set('stat_type', stat);
       params.set('streak_games', String(streak));
+      if (leagueIds.length) params.set('league_ids', leagueIds.join(','));
       return params;
     }
 
@@ -387,6 +411,7 @@
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok) throw new Error(data.detail || res.statusText);
         showUpdateMessage('Projections updated. ' + (data.log || '').slice(0, 200), false);
+        loadLastUpdated();
         loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
@@ -455,9 +480,28 @@
       btn.disabled = false;
     }
 
+    async function loadLastUpdated() {
+      try {
+        const res = await fetch(API + '/api/projections/last-updated');
+        const data = await res.json().catch(function () { return {}; });
+        const el = document.getElementById('lastUpdatedText');
+        if (data.last_updated) {
+          const d = new Date(data.last_updated);
+          el.textContent = d.toLocaleString();
+        } else {
+          el.textContent = 'Never';
+        }
+      } catch (e) {
+        document.getElementById('lastUpdatedText').textContent = '—';
+      }
+    }
+
     document.getElementById('btnRefresh').addEventListener('click', loadProjections);
     document.getElementById('statType').addEventListener('change', loadProjections);
     document.getElementById('streakGames').addEventListener('change', loadProjections);
+    document.querySelectorAll('input[name="sport"]').forEach(function (cb) {
+      cb.addEventListener('change', loadProjections);
+    });
     document.getElementById('btnUpdateProjections').addEventListener('click', updateProjections);
     document.getElementById('btnUpdateUnderdog').addEventListener('click', updateUnderdog);
     document.getElementById('btnUpdateParlayPlay').addEventListener('click', updateParlayPlay);
@@ -469,6 +513,7 @@
     document.getElementById('dateTo').value = today.toISOString().slice(0, 10);
     document.getElementById('dateFrom').value = weekAgo.toISOString().slice(0, 10);
 
+    loadLastUpdated();
     loadProjections();
   </script>
 </body>

@@ -97,21 +97,26 @@ def _normalize_name(s: str) -> str:
     return " ".join(re.split(r"\s+", s.strip()))
 
 
-def get_projections_standard(conn, league_id: int = 7) -> list[dict]:
+def get_projections_standard(conn, league_id: int | list[int] = 7) -> list[dict]:
     """Return standard, single-player projections. See get_projections with odds_type='standard'."""
     return get_projections(conn, league_id=league_id, odds_type="standard")
 
 
 def get_projections(
     conn,
-    league_id: int = 7,
+    league_id: int | list[int] = 7,
     odds_type: str | None = "standard",
 ) -> list[dict]:
     """Return single-player projections with PrizePicks display_name.
     If odds_type is None, return all odds types (standard, demon, goblin, etc.).
+    league_id can be a single int or a list of ints (multiple sports).
     """
+    league_ids = [league_id] if isinstance(league_id, int) else league_id
+    if not league_ids:
+        return []
+    placeholders = ",".join("?" * len(league_ids))
     if odds_type is not None:
-        sql = """
+        sql = f"""
         SELECT
             p.projection_id,
             p.player_id AS pp_player_id,
@@ -128,14 +133,14 @@ def get_projections(
         WHERE p.odds_type = ?
           AND p.player_id IS NOT NULL
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
-          AND p.league_id = ?
+          AND p.league_id IN ({placeholders})
           AND p.start_time > GETUTCDATE()
         ORDER BY p.stat_type_name, pp.display_name, p.line_score
         """
         cursor = conn.cursor()
-        cursor.execute(sql, (odds_type, league_id))
+        cursor.execute(sql, (odds_type, *league_ids))
     else:
-        sql = """
+        sql = f"""
         SELECT
             p.projection_id,
             p.player_id AS pp_player_id,
@@ -151,12 +156,12 @@ def get_projections(
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
         WHERE p.player_id IS NOT NULL
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
-          AND p.league_id = ?
+          AND p.league_id IN ({placeholders})
           AND p.start_time > GETUTCDATE()
         ORDER BY pp.display_name, p.stat_type_name, p.odds_type, p.line_score
         """
         cursor = conn.cursor()
-        cursor.execute(sql, (league_id,))
+        cursor.execute(sql, tuple(league_ids))
     columns = [c[0] for c in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
