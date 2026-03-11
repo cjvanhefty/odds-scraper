@@ -55,23 +55,19 @@
     .odds-tag.selected { background: var(--warn); color: #1a1d23; }
     .chart-wrap { background: #1a1d23; border-radius: 8px; padding: 1rem; margin-top: 0.5rem; }
     .chart-title { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.75rem; }
-    .chart-bars { display: flex; align-items: flex-end; justify-content: space-around; gap: 6px; padding: 0 0 0.35rem 0; position: relative; }
-    .chart-area { height: 180px; position: relative; display: flex; align-items: flex-end; justify-content: space-around; gap: 6px; width: 100%; }
-    .chart-bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; max-width: 72px; min-width: 0; height: 100%; }
+    .chart-bars { display: flex; align-items: stretch; justify-content: space-around; gap: 6px; position: relative; }
+    .chart-column { flex: 1; max-width: 72px; min-width: 0; display: flex; flex-direction: column; align-items: center; }
+    .chart-line-layer { position: absolute; left: 0; right: 0; top: 0; height: 180px; pointer-events: none; z-index: 2; }
+    .chart-projection-line { position: absolute; left: 0; right: 0; height: 2px; background: var(--warn); }
+    .chart-bar-wrap { width: 100%; height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
     .chart-bar-outer { width: 80%; max-width: 48px; min-height: 4px; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 4px 4px 0 0; overflow: hidden; }
     .chart-bar-seg { width: 100%; min-height: 2px; transition: height 0.2s; }
     .chart-bar-seg.under { background: var(--danger); }
     .chart-bar-seg.over { background: var(--success); }
     .chart-bar-seg.on-line { background: var(--muted); }
-    .chart-projection-line { position: absolute; left: 0; right: 0; height: 2px; background: var(--warn); pointer-events: none; z-index: 2; }
-    .chart-labels-row { display: flex; justify-content: space-around; gap: 6px; margin-top: 0.25rem; }
-    .chart-label-wrap { flex: 1; max-width: 72px; min-width: 0; display: flex; justify-content: center; }
-    .chart-label { font-size: 0.7rem; color: var(--muted); text-align: center; }
-    .chart-legend { font-size: 0.75rem; color: var(--muted); margin-top: 0.5rem; }
-    .chart-legend span { margin-right: 1rem; }
-    .chart-legend .leg-over { color: var(--success); }
-    .chart-legend .leg-under { color: var(--danger); }
-    .chart-legend .leg-line { color: var(--muted); }
+    .chart-label-date { font-size: 0.7rem; color: var(--muted); text-align: center; margin-top: 0.25rem; display: block; }
+    .chart-label-value { font-size: 0.7rem; font-weight: 600; color: var(--text); text-align: center; margin-top: 0.15rem; display: block; }
+    .chart-legend { margin-top: 0.5rem; }
     .chart-y-axis { font-size: 0.7rem; color: var(--muted); }
   </style>
 </head>
@@ -180,17 +176,16 @@
         <button type="button" class="modal-close" id="modalClose" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
+        <div class="chart-wrap" id="modalChartWrap" style="display: none;">
+          <div class="chart-title" id="chartStatName"></div>
+          <div class="chart-bars" id="chartBars"></div>
+          <div class="chart-legend" id="chartLegend"></div>
+        </div>
         <p id="modalStatus">Loading...</p>
         <div id="modalStatsList" style="display: none;"></div>
         <div id="modalStatDetail" class="stat-detail" style="display: none;">
           <h3>Odds types</h3>
           <div class="odds-types" id="modalOddsTypes"></div>
-          <h3>Last 5 games vs projection</h3>
-          <div class="chart-wrap">
-            <div class="chart-title" id="chartStatName"></div>
-            <div class="chart-bars" id="chartBars"></div>
-            <div class="chart-legend" id="chartLegend"></div>
-          </div>
         </div>
       </div>
     </div>
@@ -317,6 +312,7 @@
       const statsList = document.getElementById('modalStatsList');
       const statDetail = document.getElementById('modalStatDetail');
       title.textContent = playerName;
+      document.getElementById('modalChartWrap').style.display = 'none';
       statsList.style.display = 'none';
       statDetail.style.display = 'none';
       status.style.display = 'block';
@@ -333,6 +329,7 @@
         if (!res.ok) throw new Error(await res.text());
         const list = await res.json();
         status.style.display = 'none';
+        document.getElementById('modalChartWrap').style.display = 'block';
         statsList.style.display = 'block';
         statDetail.style.display = 'block';
 
@@ -377,6 +374,7 @@
           document.getElementById('modalOddsTypes').innerHTML = '';
           document.getElementById('chartBars').innerHTML = '';
           document.getElementById('chartStatName').textContent = '';
+          document.getElementById('modalChartWrap').style.display = 'none';
         }
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
@@ -392,28 +390,28 @@
       var maxVal = state.maxVal;
       if (values.length === 0) return;
       var linePct = primaryLine != null ? (primaryLine / maxVal) * 100 : 0;
-      var barsInner = values.map(function (val, i) {
+      var columnsHtml = values.map(function (val, i) {
         var label = dates[i] ? (dates[i].length >= 10 ? dates[i].slice(0, 10) : dates[i]) : 'G' + (i + 1);
         var barHeightPct = (val / maxVal) * 100;
         var tip = val + (primaryLine != null ? ' (line ' + primaryLine + ')' : '');
         var onLine = primaryLine != null && Math.abs(val - primaryLine) < 0.01;
         var over = primaryLine != null && val > primaryLine;
         var barClass = onLine ? 'on-line' : (over ? 'over' : 'under');
-        return '<div class="chart-bar-wrap">' +
+        return '<div class="chart-column">' +
+          '<div class="chart-bar-wrap">' +
           '<div class="chart-bar-outer" style="height: ' + Math.max(4, barHeightPct) + '%;" data-label="' + escapeHtml(label) + '" data-val="' + val + '">' +
           '<div class="chart-bar-seg ' + barClass + '" style="height: 100%;" title="' + escapeHtml(tip) + '"></div>' +
           '</div>' +
+          '</div>' +
+          '<span class="chart-label-date">' + escapeHtml(label) + '</span>' +
+          '<span class="chart-label-value">' + val + '</span>' +
           '</div>';
       }).join('');
       var lineHtml = (primaryLine != null && linePct > 0 && linePct <= 100)
-        ? '<div class="chart-projection-line" style="bottom: ' + linePct + '%;" title="Projection: ' + primaryLine + '"></div>'
+        ? '<div class="chart-line-layer"><div class="chart-projection-line" style="bottom: ' + linePct + '%;" title="Projection: ' + primaryLine + '"></div></div>'
         : '';
-      var labelsHtml = values.map(function (val, i) {
-        var label = dates[i] ? (dates[i].length >= 10 ? dates[i].slice(0, 10) : dates[i]) : 'G' + (i + 1);
-        return '<div class="chart-label-wrap"><div class="chart-label">' + escapeHtml(label) + '<br>' + val + '</div></div>';
-      }).join('');
-      document.getElementById('chartBars').innerHTML = '<div class="chart-area">' + barsInner + lineHtml + '</div><div class="chart-labels-row">' + labelsHtml + '</div>';
-      document.getElementById('chartLegend').innerHTML = 'All bars start at 0. <span class="leg-under">Red = under projection</span> <span class="leg-over">Green = over projection</span> <span class="leg-line">Grey = on the line</span>. Projection: ' + primaryLine;
+      document.getElementById('chartBars').innerHTML = lineHtml + columnsHtml;
+      document.getElementById('chartLegend').innerHTML = '';
     }
 
     function showStatDetail(rows) {
