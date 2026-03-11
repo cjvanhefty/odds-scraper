@@ -1,0 +1,6 @@
+[
+  {
+    "url": "https://api.consentjs.datagrail.io/save_open?user_identifier=9d589b28-1979-407b-90cb-f89e5d5f244b.f2cdf1a6-6d8e-4003-b376-937137793fea&customer=9d589b28-1979-407b-90cb-f89e5d5f244b&revision=e3bc0c13-c17a-4232-bc3e-b3ff6a977f79&current_page=https%3A%2F%2Fwww.underdogfantasy.com%2Fgames%2Fpickem&policy_name=US+Deletion+Request+Only+Policy&default_policy=false&locale_code=en&layer=none&action=non_open&cookie=_ga&cookie=datagrail_consent_id&cookie=datagrail_consent_version&cookie=_fbp&cookie=__ssid&cookie=intercom-id-dw6k0lv9&cookie=intercom-device-id-dw6k0lv9&cookie=ab.storage.deviceId.cf09bb26-355d-4ced-b2a1-5ff45c547678&cookie=ab.storage.userId.cf09bb26-355d-4ced-b2a1-5ff45c547678&cookie=AMP_MKTG_4dd69e17da&cookie=t-ip&cookie=tatari-cookie-test&cookie=tatari-session-cookie&cookie=_gcl_au&cookie=ab.storage.sessionId.cf09bb26-355d-4ced-b2a1-5ff45c547678&cookie=intercom-session-dw6k0lv9&cookie=AMP_4dd69e17da&cookie=_ga_RPPC68JN0L",
+    "body": {}
+  }
+]

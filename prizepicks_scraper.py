@@ -3,6 +3,7 @@ Prize Picks API scraper - fetches player projections and prop lines.
 Uses the public API endpoint (api.prizepicks.com) for reliable, fast data.
 """
 
+import db_config  # noqa: F401 - load .env from repo root before DB
 import httpx
 import json
 import argparse
@@ -24,6 +25,7 @@ LEAGUES = {
     "tennis": 5,
     "mma": 12,
     "epl": 14,
+    "soccer": 82,
 }
 
 BASE_URL = "https://api.prizepicks.com"
@@ -153,7 +155,7 @@ def _fetch_with_playwright(
 
 
 def fetch_projections(
-    league_id: int,
+    league_id: int | None = None,
     per_page: int = 250,
     single_stat: bool = True,
     client: httpx.Client | None = None,
@@ -164,13 +166,14 @@ def fetch_projections(
     user_data_dir: str | None = None,
     debug: bool = False,
 ) -> dict:
-    """Fetch projections from Prize Picks API."""
-    params = {
-        "league_id": league_id,
+    """Fetch projections from Prize Picks API. Pass league_id=None to get all leagues in one request."""
+    params: dict = {
         "per_page": per_page,
         "single_stat": str(single_stat).lower(),
         "game_mode": "pickem",
     }
+    if league_id is not None:
+        params["league_id"] = league_id
     url = f"{BASE_URL}/projections"
 
     if use_browser or connect_url or user_data_dir:
@@ -340,9 +343,20 @@ def parse_to_projection_stage_records(response: dict) -> list[dict]:
                 return None
 
         def _dto(v):
+            """Parse ISO datetime (with or without offset) to naive datetime for storage as YYYY-MM-DD HH:MM:SS."""
             if v is None or v == "":
                 return None
-            return v  # Pass ISO string; pyodbc handles datetimeoffset
+            s = (v if isinstance(v, str) else str(v)).strip()
+            if not s:
+                return None
+            try:
+                # Python 3.11+ fromisoformat handles "2026-03-07T18:10:00.000-05:00"
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if dt.tzinfo is not None:
+                    dt = dt.replace(tzinfo=None)  # keep wall-clock time, drop offset
+                return dt
+            except (ValueError, TypeError):
+                return None
 
         records.append({
             "projection_id": projection_id,
@@ -385,7 +399,7 @@ def parse_to_projection_stage_records(response: dict) -> list[dict]:
     return records
 
 
-def parse_to_stage_records(response: dict, league_id: int) -> list[dict]:
+def parse_to_stage_records(response: dict, league_id: int | None) -> list[dict]:
     """Parse API response into records for prizepicks_player_stage table.
 
     Each projection becomes one row with player info + stat_type as market.
@@ -451,7 +465,10 @@ def parse_to_stage_records(response: dict, league_id: int) -> list[dict]:
         seen.add(player_id)
 
         league_val = p_attrs.get("league") or ""
-        league_id_val = str(p_attrs.get("league_id", league_id) or league_id)
+        if league_id is None:
+            league_id_val = str(p_attrs.get("league_id") or "")
+        else:
+            league_id_val = str(p_attrs.get("league_id", league_id) or league_id)
 
         records.append({
             "player_id": player_id,
@@ -472,20 +489,38 @@ def parse_to_stage_records(response: dict, league_id: int) -> list[dict]:
     return records
 
 
-def _get_db_conn(server: str, database: str, user: str, password: str):
-    """Get pyodbc connection to SQL Server."""
+def _get_db_conn(
+    server: str,
+    database: str,
+    user: str,
+    password: str,
+    trusted_connection: bool = False,
+):
+    """Get pyodbc connection to SQL Server. Use trusted_connection=True for Windows auth."""
     import pyodbc
-    conn_str = (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={server};DATABASE={database};UID={user};PWD={password}"
-    )
+    if trusted_connection:
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={server};DATABASE={database};Trusted_Connection=yes;"
+        )
+    else:
+        conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={server};DATABASE={database};UID={user};PWD={password or ''}"
+        )
     try:
         return pyodbc.connect(conn_str)
     except pyodbc.Error:
-        conn_str = (
-            f"DRIVER={{SQL Server}};"
-            f"SERVER={server};DATABASE={database};UID={user};PWD={password}"
-        )
+        if trusted_connection:
+            conn_str = (
+                f"DRIVER={{SQL Server}};"
+                f"SERVER={server};DATABASE={database};Trusted_Connection=yes;"
+            )
+        else:
+            conn_str = (
+                f"DRIVER={{SQL Server}};"
+                f"SERVER={server};DATABASE={database};UID={user};PWD={password or ''}"
+            )
         return pyodbc.connect(conn_str)
 
 
@@ -499,10 +534,10 @@ def ensure_projection_stage_table(conn) -> None:
             [projection_id] [bigint] NOT NULL,
             [projection_type] [varchar](50) NOT NULL,
             [adjusted_odds] [bit] NULL,
-            [board_time] [datetimeoffset](3) NULL,
+            [board_time] [datetime2](0) NULL,
             [custom_image] [varchar](500) NULL,
             [description] [varchar](100) NULL,
-            [end_time] [datetimeoffset](3) NULL,
+            [end_time] [datetime2](0) NULL,
             [event_type] [varchar](50) NULL,
             [flash_sale_line_score] [decimal](10, 2) NULL,
             [game_id] [varchar](100) NULL,
@@ -517,13 +552,13 @@ def ensure_projection_stage_table(conn) -> None:
             [projection_display_type] [varchar](100) NULL,
             [rank] [int] NULL,
             [refundable] [bit] NULL,
-            [start_time] [datetimeoffset](3) NULL,
+            [start_time] [datetime2](0) NULL,
             [stat_display_name] [varchar](100) NULL,
             [stat_type_name] [varchar](100) NULL,
             [status] [varchar](50) NULL,
             [today] [bit] NULL,
             [tv_channel] [varchar](50) NULL,
-            [updated_at] [datetimeoffset](3) NULL,
+            [updated_at] [datetime2](0) NULL,
             [duration_id] [int] NULL,
             [game_rel_id] [int] NULL,
             [league_id] [int] NULL,
@@ -543,13 +578,14 @@ def insert_projection_stage(
     database: str = "Props",
     user: str | None = None,
     password: str | None = None,
+    trusted_connection: bool = False,
 ) -> int:
     """Insert records into prizepicks_projection_stage. Truncates first. Returns count."""
     import pyodbc
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
 
-    conn = _get_db_conn(server, database, user, password)
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
     ensure_projection_stage_table(conn)
     cols = [
         "projection_id", "projection_type", "adjusted_odds", "board_time", "custom_image",
@@ -585,16 +621,18 @@ def upsert_projection_from_stage(
     database: str = "Props",
     user: str | None = None,
     password: str | None = None,
-) -> tuple[int, int]:
+    trusted_connection: bool = False,
+) -> tuple[int, int, int, int]:
     """Upsert from prizepicks_projection_stage to prizepicks_projection.
-    When line_score changes, copies current projection row to prizepicks_projection_history first.
-    Returns (inserted_count, updated_count).
+    When line_score changes, copies current projection row to prizepicks_projection_history.
+    Moves rows whose start_time has passed to history and deletes them from projection.
+    Returns (merge_rowcount, history_line_change_count, moved_to_history_count, deleted_count).
     """
     import pyodbc
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
 
-    conn = _get_db_conn(server, database, user, password)
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
 
     # 1. Copy current projection to history where line_score changed and not already in history
     history_sql = """
@@ -623,7 +661,37 @@ def upsert_projection_from_stage(
           AND NOT EXISTS (SELECT 1 FROM [dbo].[prizepicks_projection_history] h WHERE h.projection_id = p.projection_id)
     """
 
-    # 2. MERGE stage into projection
+    # 2. Move to history any projection whose start_time has passed (then delete from projection)
+    move_passed_sql = """
+        INSERT INTO [dbo].[prizepicks_projection_history] (
+            projection_id, projection_type, adjusted_odds, board_time, custom_image,
+            description, end_time, event_type, flash_sale_line_score, game_id,
+            group_key, hr_20, in_game, is_live, is_live_scored, is_promo,
+            line_score, odds_type, projection_display_type, rank, refundable,
+            start_time, stat_display_name, stat_type_name, status, today,
+            tv_channel, updated_at, duration_id, game_rel_id, league_id,
+            player_id, projection_type_id, score_id, stat_type_id,
+            created_at, last_modified_at
+        )
+        SELECT
+            p.projection_id, p.projection_type, p.adjusted_odds, p.board_time, p.custom_image,
+            p.description, p.end_time, p.event_type, p.flash_sale_line_score, p.game_id,
+            p.group_key, p.hr_20, p.in_game, p.is_live, p.is_live_scored, p.is_promo,
+            p.line_score, p.odds_type, p.projection_display_type, p.rank, p.refundable,
+            p.start_time, p.stat_display_name, p.stat_type_name, p.status, p.today,
+            p.tv_channel, p.updated_at, p.duration_id, p.game_rel_id, p.league_id,
+            p.player_id, p.projection_type_id, p.score_id, p.stat_type_id,
+            p.created_at, p.last_modified_at
+        FROM [dbo].[prizepicks_projection] p
+        WHERE p.start_time < SYSDATETIMEOFFSET()
+          AND NOT EXISTS (SELECT 1 FROM [dbo].[prizepicks_projection_history] h WHERE h.projection_id = p.projection_id);
+    """
+    delete_passed_sql = """
+        DELETE FROM [dbo].[prizepicks_projection]
+        WHERE start_time < SYSDATETIMEOFFSET();
+    """
+
+    # 3. MERGE stage into projection
     merge_sql = f"""
         MERGE [dbo].[prizepicks_projection] AS t
         USING [dbo].[prizepicks_projection_stage] AS s
@@ -691,8 +759,12 @@ def upsert_projection_from_stage(
         history_count = cursor.rowcount
         cursor.execute(merge_sql)
         merge_count = cursor.rowcount
+        cursor.execute(move_passed_sql)
+        moved_count = cursor.rowcount
+        cursor.execute(delete_passed_sql)
+        deleted_count = cursor.rowcount
     conn.close()
-    return (merge_count, history_count)
+    return (merge_count, history_count, moved_count, deleted_count)
 
 
 def ensure_player_stage_table(conn) -> None:
@@ -728,12 +800,13 @@ def insert_player_stage(
     database: str = "Props",
     user: str | None = None,
     password: str | None = None,
+    trusted_connection: bool = False,
 ) -> int:
     """Insert records into prizepicks_player_stage. Truncates first. Returns count."""
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
 
-    conn = _get_db_conn(server, database, user, password)
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
     ensure_player_stage_table(conn)
     cols = [
         "player_id", "combo", "display_name", "image_url", "jersey_number",
@@ -760,12 +833,13 @@ def upsert_player_from_stage(
     database: str = "Props",
     user: str | None = None,
     password: str | None = None,
+    trusted_connection: bool = False,
 ) -> int:
     """Upsert from prizepicks_player_stage to prizepicks_player. No history. Returns rows affected."""
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
 
-    conn = _get_db_conn(server, database, user, password)
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
     merge_sql = """
         MERGE [dbo].[prizepicks_player] AS t
         USING [dbo].[prizepicks_player_stage] AS s
@@ -813,7 +887,12 @@ def main():
         "-l", "--league",
         default="nba",
         choices=list(LEAGUES.keys()),
-        help="League to scrape (default: nba)",
+        help="League to scrape (default: nba). Ignored if --all-leagues.",
+    )
+    parser.add_argument(
+        "--all-leagues",
+        action="store_true",
+        help="Fetch projections from every league (nba, nfl, nhl, mlb, cfb, cbb, wnba, pga, tennis, mma, epl, soccer) and upsert.",
     )
     parser.add_argument(
         "--league-id",
@@ -878,34 +957,54 @@ def main():
     )
     parser.add_argument(
         "--db-password",
-        default=os.environ.get("PROPS_DB_PASSWORD", "Mason12!@"),
-        help="Database password (default from PROPS_DB_PASSWORD env)",
+        default=os.environ.get("PROPS_DB_PASSWORD", ""),
+        help="Database password (set PROPS_DB_PASSWORD or use --trusted-connection for Windows auth)",
+    )
+    parser.add_argument(
+        "--trusted-connection",
+        action="store_true",
+        help="Use Windows Authentication (no user/password)",
     )
     args = parser.parse_args()
 
-    league_id = args.league_id or LEAGUES.get(args.league, 7)
-
-    print(f"Fetching projections for league_id={league_id} ({args.league})...")
     connect_url = args.connect if args.connect else None
     user_data_dir = ".playwright-prizepicks" if args.persistent else None
-    resp = fetch_projections(
-        league_id,
-        per_page=args.per_page,
-        use_browser=args.browser,
-        cookies_path=args.cookies,
-        headed=args.headed,
-        connect_url=connect_url,
-        user_data_dir=user_data_dir,
-        debug=args.debug,
-    )
-    projections = parse_projections(resp)
 
-    if not projections:
-        print("No projections found. The API structure may have changed.")
-        print("Raw response sample (first 500 chars):")
+    if args.all_leagues:
+        # One request with no league_id to get all projections (no per-league filtering)
+        print("Fetching all projections (single request, no league filter)...")
+        try:
+            resp = fetch_projections(
+                league_id=None,
+                per_page=args.per_page,
+                use_browser=args.browser,
+                cookies_path=args.cookies,
+                headed=args.headed,
+                connect_url=connect_url,
+                user_data_dir=user_data_dir,
+                debug=args.debug,
+            )
+        except Exception as e:
+            print(f"Single-request failed: {e}")
+            resp = None
+        if not resp:
+            print("No response.")
+            return 1
+        projections = parse_projections(resp)
+        all_projection_records = parse_to_projection_stage_records(resp)
+        # league_id=None: parser uses league from each projection/player in response
+        player_records_list = parse_to_stage_records(resp, None)
+        all_player_records = {pr.get("player_id", ""): pr for pr in player_records_list}
+        if not projections:
+            print("No projections in response (API may require league_id).")
+            return 1
+        print(f"Total: {len(projections)} projections, {len(all_player_records)} unique players")
+    else:
+        league_id = args.league_id or LEAGUES.get(args.league, 7)
+        print(f"Fetching projections for league_id={league_id} ({args.league})...")
         resp = fetch_projections(
             league_id,
-            per_page=10,
+            per_page=args.per_page,
             use_browser=args.browser,
             cookies_path=args.cookies,
             headed=args.headed,
@@ -913,35 +1012,53 @@ def main():
             user_data_dir=user_data_dir,
             debug=args.debug,
         )
-        print(json.dumps(resp, indent=2)[:500])
-        return 1
-
-    print(f"Found {len(projections)} projections")
+        projections = parse_projections(resp)
+        if not projections:
+            print("No projections found. The API structure may have changed.")
+            print("Raw response sample (first 500 chars):")
+            resp = fetch_projections(
+                league_id,
+                per_page=10,
+                use_browser=args.browser,
+                cookies_path=args.cookies,
+                headed=args.headed,
+                connect_url=connect_url,
+                user_data_dir=user_data_dir,
+                debug=args.debug,
+            )
+            print(json.dumps(resp, indent=2)[:500])
+            return 1
+        print(f"Found {len(projections)} projections")
 
     if args.db:
-        records = parse_to_projection_stage_records(resp)
+        if args.all_leagues:
+            records = all_projection_records
+            player_records = list(all_player_records.values())
+        else:
+            records = parse_to_projection_stage_records(resp)
+            player_records = parse_to_stage_records(resp, league_id)
         if not records:
             print("No projection records to upsert.")
             return 1
         try:
+            trusted = getattr(args, "trusted_connection", False) or os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
             n = insert_projection_stage(
                 records,
                 server=args.db_server,
                 database="Props",
                 user=args.db_user,
                 password=args.db_password,
+                trusted_connection=trusted,
             )
             print(f"Loaded {n} rows into prizepicks_projection_stage")
-            merge_count, history_count = upsert_projection_from_stage(
+            merge_count, history_count, moved_count, deleted_count = upsert_projection_from_stage(
                 server=args.db_server,
                 database="Props",
                 user=args.db_user,
                 password=args.db_password,
+                trusted_connection=trusted,
             )
-            print(f"Upserted {merge_count} rows to prizepicks_projection ({history_count} archived to history)")
-
-            # Player flow: stage → prizepicks_player (no history)
-            player_records = parse_to_stage_records(resp, league_id)
+            print(f"Upserted {merge_count} rows to prizepicks_projection ({history_count} archived on line change, {moved_count} moved to history for passed start_time, {deleted_count} deleted)")
             if player_records:
                 pn = insert_player_stage(
                     player_records,
@@ -949,6 +1066,7 @@ def main():
                     database="Props",
                     user=args.db_user,
                     password=args.db_password,
+                    trusted_connection=trusted,
                 )
                 print(f"Loaded {pn} rows into prizepicks_player_stage")
                 p_merge = upsert_player_from_stage(
@@ -956,6 +1074,7 @@ def main():
                     database="Props",
                     user=args.db_user,
                     password=args.db_password,
+                    trusted_connection=trusted,
                 )
                 print(f"Upserted {p_merge} rows to prizepicks_player")
         except Exception as e:
@@ -975,10 +1094,10 @@ def main():
             df = pd.DataFrame(projections)
             df.to_csv(out, index=False)
         print(f"Saved to {out}")
-    else:
+    elif not args.all_leagues:
         for p in projections[:20]:
             print(p)
-        if len(projections) > 20:
+        if len(projections) > 20 and not args.all_leagues:
             print(f"... and {len(projections) - 20} more")
 
     return 0

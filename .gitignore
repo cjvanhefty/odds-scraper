@@ -1,0 +1,3 @@
+# Local env with DB credentials (copy from .env.example)
+.env
+.env.txt

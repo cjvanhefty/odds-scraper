@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Projections</title>
+  <style>
+    :root { --bg: #1a1d23; --card: #252930; --text: #e6e8eb; --muted: #8b919a; --accent: #5b8def; --success: #3d9d6b; --warn: #c9a227; --danger: #c94a47; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1rem; }
+    h1 { font-size: 1.5rem; margin: 0 0 1rem 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-bottom: 1rem; }
+    .controls label { display: flex; align-items: center; gap: 0.5rem; }
+    .controls select, .controls input { padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid #3a3f48; background: var(--card); color: var(--text); }
+    .btn { padding: 0.5rem 1rem; border-radius: 6px; border: none; cursor: pointer; font-weight: 500; background: var(--accent); color: #fff; }
+    .btn:hover { filter: brightness(1.1); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn.secondary { background: #3a3f48; }
+    .section { background: var(--card); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .section h2 { font-size: 1rem; margin: 0 0 0.75rem 0; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #2d323a; }
+    th { color: var(--muted); font-weight: 500; }
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .badge.low { background: rgba(61, 157, 107, 0.3); color: var(--success); }
+    .badge.medium { background: rgba(201, 162, 39, 0.3); color: var(--warn); }
+    .badge.high { background: rgba(201, 74, 71, 0.3); color: var(--danger); }
+    .favored { color: var(--success); }
+    .message { padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; }
+    .message.error { background: rgba(201, 74, 71, 0.2); color: var(--danger); }
+    .message.success { background: rgba(61, 157, 107, 0.2); color: var(--success); }
+    .loading { opacity: 0.7; pointer-events: none; }
+    .player-link { color: var(--accent); cursor: pointer; text-decoration: underline; }
+    .player-link:hover { color: #7ba8f7; }
+
+    /* Modal */
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: none; align-items: center; justify-content: center; padding: 1rem; }
+    .modal-backdrop.open { display: flex; }
+    .modal-box { background: var(--card); border-radius: 12px; max-width: 560px; width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+    .modal-header { padding: 1rem 1.25rem; border-bottom: 1px solid #2d323a; display: flex; justify-content: space-between; align-items: center; }
+    .modal-title { font-size: 1.25rem; font-weight: 600; margin: 0; }
+    .modal-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.5rem; line-height: 1; padding: 0.25rem; }
+    .modal-close:hover { color: var(--text); }
+    .modal-body { padding: 1rem 1.25rem; overflow-y: auto; }
+    .modal-body h3 { font-size: 0.9rem; color: var(--muted); margin: 0 0 0.5rem 0; }
+    .stat-row { padding: 0.6rem 0; border-bottom: 1px solid #2d323a; cursor: pointer; border-radius: 6px; margin-bottom: 2px; }
+    .stat-row:hover { background: #2d323a; }
+    .stat-row.selected { background: rgba(91, 141, 239, 0.2); border-color: var(--accent); }
+    .stat-name { font-weight: 500; }
+    .stat-lines { font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem; }
+    .stat-detail { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #2d323a; }
+    .odds-types { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    .odds-tag { padding: 0.25rem 0.5rem; border-radius: 4px; background: #3a3f48; font-size: 0.85rem; cursor: pointer; }
+    .odds-tag:hover { background: #454b55; }
+    .odds-tag.selected { background: var(--warn); color: #1a1d23; }
+    .chart-wrap { background: #1a1d23; border-radius: 8px; padding: 1rem; margin-top: 0.5rem; }
+    .chart-title { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.75rem; }
+    .chart-bars { display: flex; align-items: flex-end; justify-content: space-around; gap: 6px; padding: 0 0 0.35rem 0; position: relative; }
+    .chart-area { height: 180px; position: relative; display: flex; align-items: flex-end; justify-content: space-around; gap: 6px; width: 100%; }
+    .chart-bar-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; max-width: 72px; min-width: 0; height: 100%; }
+    .chart-bar-outer { width: 80%; max-width: 48px; min-height: 4px; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 4px 4px 0 0; overflow: hidden; }
+    .chart-bar-seg { width: 100%; min-height: 2px; transition: height 0.2s; }
+    .chart-bar-seg.under { background: var(--danger); }
+    .chart-bar-seg.over { background: var(--success); }
+    .chart-bar-seg.on-line { background: var(--muted); }
+    .chart-projection-line { position: absolute; left: 0; right: 0; height: 2px; background: var(--warn); pointer-events: none; z-index: 2; }
+    .chart-labels-row { display: flex; justify-content: space-around; gap: 6px; margin-top: 0.25rem; }
+    .chart-label-wrap { flex: 1; max-width: 72px; min-width: 0; display: flex; justify-content: center; }
+    .chart-label { font-size: 0.7rem; color: var(--muted); text-align: center; }
+    .chart-legend { font-size: 0.75rem; color: var(--muted); margin-top: 0.5rem; }
+    .chart-legend span { margin-right: 1rem; }
+    .chart-legend .leg-over { color: var(--success); }
+    .chart-legend .leg-under { color: var(--danger); }
+    .chart-legend .leg-line { color: var(--muted); }
+    .chart-y-axis { font-size: 0.7rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>PrizePicks Projections</h1>
+
+  <div class="section">
+    <h2>Update data</h2>
+    <div class="controls">
+      <button type="button" class="btn" id="btnUpdateProjections">Update PrizePicks</button>
+      <button type="button" class="btn secondary" id="btnUpdateUnderdog">Update Underdog</button>
+      <button type="button" class="btn secondary" id="btnUpdateParlayPlay">Update Parlay Play</button>
+      <span style="margin-left: 1rem;"></span>
+      <label>From: <input type="date" id="dateFrom" /></label>
+      <label>To: <input type="date" id="dateTo" /></label>
+      <button type="button" class="btn secondary" id="btnUpdateNbaStats">Update NBA stats</button>
+    </div>
+    <div id="updateMessage"></div>
+  </div>
+
+  <div class="controls">
+    <label>
+      Stat:
+      <select id="statType">
+        <option value="">All</option>
+        <option value="Points">Points</option>
+        <option value="Rebounds">Rebounds</option>
+        <option value="Assists">Assists</option>
+        <option value="Steals">Steals</option>
+        <option value="Blocks">Blocks</option>
+        <option value="Turnovers">Turnovers</option>
+        <option value="Defensive Rebounds">Defensive Rebounds</option>
+        <option value="Offensive Rebounds">Offensive Rebounds</option>
+        <option value="3 Pointers Made">3 Pointers Made</option>
+        <option value="3 Pointers">3 Pointers</option>
+      </select>
+    </label>
+    <label>
+      Streak (games):
+      <select id="streakGames">
+        <option value="3">3</option>
+        <option value="5" selected>5</option>
+      </select>
+    </label>
+    <button type="button" class="btn" id="btnRefresh">Refresh list</button>
+  </div>
+
+  <div class="section">
+    <h2>Current projections</h2>
+    <div id="tableWrap">
+      <p id="tableStatus">Loading...</p>
+      <table id="projectionsTable" style="display: none;">
+        <thead>
+          <tr>
+            <th>Player</th>
+            <th>Start time</th>
+            <th>Stat</th>
+            <th>PrizePicks</th>
+            <th>Underdog</th>
+            <th>Parlay Play</th>
+            <th>Risk</th>
+            <th>Favored</th>
+          </tr>
+        </thead>
+        <tbody id="projectionsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Player modal -->
+  <div class="modal-backdrop" id="playerModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2 class="modal-title" id="modalPlayerName"></h2>
+        <button type="button" class="modal-close" id="modalClose" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="modalStatus">Loading...</p>
+        <div id="modalStatsList" style="display: none;"></div>
+        <div id="modalStatDetail" class="stat-detail" style="display: none;">
+          <h3>Odds types</h3>
+          <div class="odds-types" id="modalOddsTypes"></div>
+          <h3>Last 5 games vs projection</h3>
+          <div class="chart-wrap">
+            <div class="chart-title" id="chartStatName"></div>
+            <div class="chart-bars" id="chartBars"></div>
+            <div class="chart-legend" id="chartLegend"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = '';
+    let currentProjections = [];
+
+    function getParams() {
+      const stat = document.getElementById('statType').value;
+      const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
+      const params = new URLSearchParams();
+      if (stat) params.set('stat_type', stat);
+      params.set('streak_games', String(streak));
+      return params;
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s == null ? '' : String(s);
+      return div.innerHTML;
+    }
+
+    async function loadProjections() {
+      const wrap = document.getElementById('tableWrap');
+      const status = document.getElementById('tableStatus');
+      const table = document.getElementById('projectionsTable');
+      const body = document.getElementById('projectionsBody');
+      wrap.classList.add('loading');
+      status.textContent = 'Loading...';
+      table.style.display = 'none';
+      try {
+        const qs = getParams().toString();
+        const res = await fetch(API + '/api/projections' + (qs ? '?' + qs : ''));
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        currentProjections = data;
+        status.textContent = '';
+        table.style.display = 'table';
+        body.innerHTML = data.map(function (r) {
+          const risk = r.risk ? '<span class="badge ' + (r.risk === 'Low' ? 'low' : r.risk === 'Medium' ? 'medium' : 'high') + '">' + r.risk + '</span>' : '—';
+          const favored = r.favored ? '<span class="favored">' + (r.streak_games || 5) + '/' + (r.streak_games || 5) + ' over</span>' : '—';
+          const start = r.start_time ? new Date(r.start_time).toLocaleString() : '—';
+          const linePP = r.line_score != null ? Number(r.line_score) : '—';
+          const lineUD = r.line_underdog != null ? Number(r.line_underdog) : '—';
+          const linePP2 = r.line_parlay_play != null ? Number(r.line_parlay_play) : '—';
+          const playerName = r.display_name || r.pp_name || '';
+          return '<tr><td><span class="player-link" data-player="' + escapeHtml(playerName) + '">' + escapeHtml(playerName) + '</span></td><td>' + start + '</td><td>' + escapeHtml(r.stat_type_name || '') + '</td><td>' + linePP + '</td><td>' + lineUD + '</td><td>' + linePP2 + '</td><td>' + risk + '</td><td>' + favored + '</td></tr>';
+        }).join('');
+        body.querySelectorAll('.player-link').forEach(function (el) {
+          el.addEventListener('click', function () { openPlayerModal(el.getAttribute('data-player')); });
+        });
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+      wrap.classList.remove('loading');
+    }
+
+    async function openPlayerModal(playerName) {
+      const modal = document.getElementById('playerModal');
+      const title = document.getElementById('modalPlayerName');
+      const status = document.getElementById('modalStatus');
+      const statsList = document.getElementById('modalStatsList');
+      const statDetail = document.getElementById('modalStatDetail');
+      title.textContent = playerName;
+      statsList.style.display = 'none';
+      statDetail.style.display = 'none';
+      status.style.display = 'block';
+      status.textContent = 'Loading...';
+      modal.classList.add('open');
+
+      const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
+      const params = new URLSearchParams();
+      params.set('player_name', playerName);
+      params.set('include_all_odds', 'true');
+      params.set('streak_games', String(streak));
+      try {
+        const res = await fetch(API + '/api/projections?' + params.toString());
+        if (!res.ok) throw new Error(await res.text());
+        const list = await res.json();
+        status.style.display = 'none';
+        statsList.style.display = 'block';
+        statDetail.style.display = 'block';
+
+        var byStat = {};
+        list.forEach(function (r) {
+          var stat = r.stat_type_name || '';
+          if (!byStat[stat]) byStat[stat] = [];
+          byStat[stat].push(r);
+        });
+        var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', '3 Pointers Made', '3 Pointers'];
+        var stats = Object.keys(byStat).sort(function (a, b) {
+          var i = statOrder.indexOf(a);
+          var j = statOrder.indexOf(b);
+          if (i !== -1 && j !== -1) return i - j;
+          if (i !== -1) return -1;
+          if (j !== -1) return 1;
+          return a.localeCompare(b);
+        });
+
+        statsList.innerHTML = stats.map(function (stat) {
+          var rows = byStat[stat];
+          var lines = rows.map(function (r) { return (r.odds_type || 'standard') + ' ' + (r.line_score != null ? Number(r.line_score) : ''); }).join(', ');
+          return '<div class="stat-row" data-stat="' + escapeHtml(stat) + '">' +
+            '<div class="stat-name">' + escapeHtml(stat) + '</div>' +
+            '<div class="stat-lines">' + escapeHtml(lines) + '</div>' +
+            '</div>';
+        }).join('');
+
+        statsList.querySelectorAll('.stat-row').forEach(function (el) {
+          el.addEventListener('click', function () {
+            statsList.querySelectorAll('.stat-row').forEach(function (r) { r.classList.remove('selected'); });
+            el.classList.add('selected');
+            showStatDetail(byStat[el.getAttribute('data-stat')]);
+          });
+        });
+
+        if (stats.length > 0) {
+          var firstStat = byStat[stats[0]];
+          statsList.querySelector('.stat-row').classList.add('selected');
+          showStatDetail(firstStat);
+        } else {
+          document.getElementById('modalOddsTypes').innerHTML = '';
+          document.getElementById('chartBars').innerHTML = '';
+          document.getElementById('chartStatName').textContent = '';
+        }
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    var statDetailState = { rows: null, values: [], dates: [], maxVal: 1, lines: [] };
+
+    function updateChartForLine(primaryLine) {
+      var state = statDetailState;
+      var values = state.values;
+      var dates = state.dates;
+      var maxVal = state.maxVal;
+      if (values.length === 0) return;
+      var linePct = primaryLine != null ? (primaryLine / maxVal) * 100 : 0;
+      var barsInner = values.map(function (val, i) {
+        var label = dates[i] ? (dates[i].length >= 10 ? dates[i].slice(0, 10) : dates[i]) : 'G' + (i + 1);
+        var barHeightPct = (val / maxVal) * 100;
+        var tip = val + (primaryLine != null ? ' (line ' + primaryLine + ')' : '');
+        var onLine = primaryLine != null && Math.abs(val - primaryLine) < 0.01;
+        var over = primaryLine != null && val > primaryLine;
+        var barClass = onLine ? 'on-line' : (over ? 'over' : 'under');
+        return '<div class="chart-bar-wrap">' +
+          '<div class="chart-bar-outer" style="height: ' + Math.max(4, barHeightPct) + '%;" data-label="' + escapeHtml(label) + '" data-val="' + val + '">' +
+          '<div class="chart-bar-seg ' + barClass + '" style="height: 100%;" title="' + escapeHtml(tip) + '"></div>' +
+          '</div>' +
+          '</div>';
+      }).join('');
+      var lineHtml = (primaryLine != null && linePct > 0 && linePct <= 100)
+        ? '<div class="chart-projection-line" style="bottom: ' + linePct + '%;" title="Projection: ' + primaryLine + '"></div>'
+        : '';
+      var labelsHtml = values.map(function (val, i) {
+        var label = dates[i] ? (dates[i].length >= 10 ? dates[i].slice(0, 10) : dates[i]) : 'G' + (i + 1);
+        return '<div class="chart-label-wrap"><div class="chart-label">' + escapeHtml(label) + '<br>' + val + '</div></div>';
+      }).join('');
+      document.getElementById('chartBars').innerHTML = '<div class="chart-area">' + barsInner + lineHtml + '</div><div class="chart-labels-row">' + labelsHtml + '</div>';
+      document.getElementById('chartLegend').innerHTML = 'All bars start at 0. <span class="leg-under">Red = under projection</span> <span class="leg-over">Green = over projection</span> <span class="leg-line">Grey = on the line</span>. Projection: ' + primaryLine;
+    }
+
+    function showStatDetail(rows) {
+      if (!rows || rows.length === 0) return;
+      var first = rows[0];
+      var statName = first.stat_type_name || '';
+      document.getElementById('chartStatName').textContent = statName + ' — last 5 games';
+
+      var values = first.last_n_values || [];
+      var dates = first.last_n_dates || [];
+      var lines = rows.map(function (r) { return r.line_score != null ? Number(r.line_score) : null; }).filter(Boolean);
+      var maxLine = lines.length ? Math.max.apply(null, lines) : 0;
+      var maxVal = Math.max(maxLine, values.length ? Math.max.apply(null, values) : 0);
+      if (maxVal <= 0) maxVal = 1;
+      statDetailState = { rows: rows, values: values, dates: dates, maxVal: maxVal, lines: lines };
+
+      var primaryLine = first.line_score != null ? Number(first.line_score) : (lines[0] || 0);
+      var oddsHtml = rows.map(function (r, idx) {
+        var line = r.line_score != null ? Number(r.line_score) : '';
+        var tagLine = r.line_score != null ? Number(r.line_score) : '';
+        var isSelected = (idx === 0) || (tagLine === primaryLine && primaryLine != null);
+        return '<span class="odds-tag' + (isSelected ? ' selected' : '') + '" data-line="' + tagLine + '" data-odds="' + escapeHtml(r.odds_type || 'standard') + '">' + escapeHtml(r.odds_type || 'standard') + ': ' + line + '</span>';
+      }).join('');
+      document.getElementById('modalOddsTypes').innerHTML = oddsHtml;
+
+      if (values.length === 0) {
+        document.getElementById('chartBars').innerHTML = '<div class="chart-label" style="width:100%;">No last-game data for this stat.</div>';
+        document.getElementById('chartLegend').innerHTML = '';
+      } else {
+        updateChartForLine(primaryLine);
+      }
+    }
+
+    document.getElementById('modalOddsTypes').addEventListener('click', function (e) {
+      var tag = e.target.closest && e.target.closest('.odds-tag');
+      if (!tag) return;
+      var line = parseFloat(tag.getAttribute('data-line'));
+      if (isNaN(line)) return;
+      document.getElementById('modalOddsTypes').querySelectorAll('.odds-tag').forEach(function (t) { t.classList.remove('selected'); });
+      tag.classList.add('selected');
+      updateChartForLine(line);
+    });
+
+    document.getElementById('modalClose').addEventListener('click', function () {
+      document.getElementById('playerModal').classList.remove('open');
+    });
+    document.getElementById('playerModal').addEventListener('click', function (e) {
+      if (e.target === this) this.classList.remove('open');
+    });
+
+    function showUpdateMessage(text, isError) {
+      var el = document.getElementById('updateMessage');
+      el.innerHTML = '<div class="message ' + (isError ? 'error' : 'success') + '">' + escapeHtml(text) + '</div>';
+    }
+
+    async function updateProjections() {
+      var btn = document.getElementById('btnUpdateProjections');
+      btn.disabled = true;
+      showUpdateMessage('Updating projections...', false);
+      try {
+        var res = await fetch(API + '/api/update/projections', { method: 'POST' });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        showUpdateMessage('Projections updated. ' + (data.log || '').slice(0, 200), false);
+        loadProjections();
+      } catch (e) {
+        showUpdateMessage('Failed: ' + e.message, true);
+      }
+      btn.disabled = false;
+    }
+
+    async function updateUnderdog() {
+      var btn = document.getElementById('btnUpdateUnderdog');
+      btn.disabled = true;
+      showUpdateMessage('Updating Underdog projections (browser capture)...', false);
+      try {
+        var res = await fetch(API + '/api/update/underdog-projections', { method: 'POST' });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        showUpdateMessage((data.message || 'Underdog updated.') + (data.log ? ' ' + (data.log + '').slice(0, 180) : ''), false);
+        loadProjections();
+      } catch (e) {
+        showUpdateMessage('Failed: ' + e.message, true);
+      }
+      btn.disabled = false;
+    }
+
+    async function updateParlayPlay() {
+      var btn = document.getElementById('btnUpdateParlayPlay');
+      btn.disabled = true;
+      showUpdateMessage('Updating Parlay Play projections (browser capture)...', false);
+      try {
+        var res = await fetch(API + '/api/update/parlayplay-projections', { method: 'POST' });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        showUpdateMessage('Parlay Play updated. ' + (data.log || '').slice(0, 200), false);
+        loadProjections();
+      } catch (e) {
+        showUpdateMessage('Failed: ' + e.message, true);
+      }
+      btn.disabled = false;
+    }
+
+    async function updateNbaStats() {
+      var fromVal = document.getElementById('dateFrom').value;
+      var toVal = document.getElementById('dateTo').value;
+      if (!fromVal || !toVal) {
+        showUpdateMessage('Please set both date from and date to.', true);
+        return;
+      }
+      if (fromVal > toVal) {
+        showUpdateMessage('Date from must be before date to.', true);
+        return;
+      }
+      var btn = document.getElementById('btnUpdateNbaStats');
+      btn.disabled = true;
+      showUpdateMessage('Updating NBA stats...', false);
+      try {
+        var res = await fetch(API + '/api/update/nba-stats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date_from: fromVal, date_to: toVal }),
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok) throw new Error(data.detail || res.statusText);
+        showUpdateMessage('NBA stats updated. ' + (data.log || '').slice(0, 200), false);
+      } catch (e) {
+        showUpdateMessage('Failed: ' + e.message, true);
+      }
+      btn.disabled = false;
+    }
+
+    document.getElementById('btnRefresh').addEventListener('click', loadProjections);
+    document.getElementById('statType').addEventListener('change', loadProjections);
+    document.getElementById('streakGames').addEventListener('change', loadProjections);
+    document.getElementById('btnUpdateProjections').addEventListener('click', updateProjections);
+    document.getElementById('btnUpdateUnderdog').addEventListener('click', updateUnderdog);
+    document.getElementById('btnUpdateParlayPlay').addEventListener('click', updateParlayPlay);
+    document.getElementById('btnUpdateNbaStats').addEventListener('click', updateNbaStats);
+
+    var today = new Date();
+    var weekAgo = new Date(today);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    document.getElementById('dateTo').value = today.toISOString().slice(0, 10);
+    document.getElementById('dateFrom').value = weekAgo.toISOString().slice(0, 10);
+
+    loadProjections();
+  </script>
+</body>
+</html>
