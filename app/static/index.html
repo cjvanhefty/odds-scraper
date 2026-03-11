@@ -140,17 +140,6 @@
       <h2 style="margin: 0;">Current projections</h2>
       <div id="topPagination" class="pagination-row muted" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem;"></div>
     </div>
-    <div style="display: flex; justify-content: flex-end; align-items: center; margin-bottom: 0.5rem;">
-      <label class="muted" style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; margin: 0;">
-        Per page:
-        <select id="pageSize" style="padding: 0.25rem 0.4rem; font-size: 0.85rem;">
-          <option value="25">25</option>
-          <option value="50" selected>50</option>
-          <option value="100">100</option>
-          <option value="200">200</option>
-        </select>
-      </label>
-    </div>
     <div id="tableWrap">
       <p id="tableStatus">Loading...</p>
       <table id="projectionsTable" style="display: none;">
@@ -169,7 +158,18 @@
         <tbody id="projectionsBody"></tbody>
       </table>
     </div>
-    <div id="bottomPagination" class="pagination-row muted" style="display: flex; justify-content: flex-end; align-items: center; gap: 0.75rem; margin-top: 0.75rem; font-size: 0.9rem;"></div>
+    <div style="display: flex; justify-content: flex-end; align-items: center; gap: 0.75rem; margin-top: 0.75rem;">
+      <label class="muted" style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; margin: 0;">
+        Per page:
+        <select id="pageSize">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </label>
+      <div id="bottomPagination" class="pagination-row muted" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem;"></div>
+    </div>
   </div>
 
   <!-- Player modal -->
