@@ -136,7 +136,21 @@
   </div>
 
   <div class="section">
-    <h2>Current projections</h2>
+    <div class="section-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem;">
+      <h2 style="margin: 0;">Current projections</h2>
+      <div id="topPagination" class="pagination-row muted" style="display: flex; align-items: center; gap: 0.75rem; font-size: 0.9rem;"></div>
+    </div>
+    <div style="display: flex; justify-content: flex-end; align-items: center; margin-bottom: 0.5rem;">
+      <label class="muted" style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; margin: 0;">
+        Per page:
+        <select id="pageSize" style="padding: 0.25rem 0.4rem; font-size: 0.85rem;">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+      </label>
+    </div>
     <div id="tableWrap">
       <p id="tableStatus">Loading...</p>
       <table id="projectionsTable" style="display: none;">
@@ -155,6 +169,7 @@
         <tbody id="projectionsBody"></tbody>
       </table>
     </div>
+    <div id="bottomPagination" class="pagination-row muted" style="display: flex; justify-content: flex-end; align-items: center; gap: 0.75rem; margin-top: 0.75rem; font-size: 0.9rem;"></div>
   </div>
 
   <!-- Player modal -->
@@ -191,14 +206,21 @@
       return Array.from(checkboxes).map(function (cb) { return cb.value; });
     }
 
+    let currentPage = 1;
+
     function getParams() {
       const stat = document.getElementById('statType').value;
       const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
       const leagueIds = getSelectedLeagueIds();
+      const pageSize = parseInt(document.getElementById('pageSize').value, 10) || 50;
       const params = new URLSearchParams();
       if (stat) params.set('stat_type', stat);
       params.set('streak_games', String(streak));
       if (leagueIds.length) params.set('league_ids', leagueIds.join(','));
+      if (pageSize > 0) {
+        params.set('page', String(currentPage));
+        params.set('page_size', String(pageSize));
+      }
       return params;
     }
 
@@ -206,6 +228,35 @@
       const div = document.createElement('div');
       div.textContent = s == null ? '' : String(s);
       return div.innerHTML;
+    }
+
+    function renderPagination(total, page, pageSize) {
+      const topEl = document.getElementById('topPagination');
+      const bottomEl = document.getElementById('bottomPagination');
+      if (total === 0 || pageSize <= 0) {
+        topEl.innerHTML = '';
+        bottomEl.innerHTML = '';
+        return;
+      }
+      const totalPages = Math.ceil(total / pageSize) || 1;
+      const start = (page - 1) * pageSize + 1;
+      const end = Math.min(page * pageSize, total);
+      var html = 'Showing ' + start + '–' + end + ' of ' + total;
+      if (page > 1) {
+        html += ' <button type="button" class="btn secondary page-prev">Previous</button>';
+      }
+      html += ' <span>Page ' + page + ' of ' + totalPages + '</span>';
+      if (page < totalPages) {
+        html += ' <button type="button" class="btn secondary page-next">Next</button>';
+      }
+      topEl.innerHTML = html;
+      bottomEl.innerHTML = html;
+      function goPrev() { currentPage = page - 1; loadProjections(); }
+      function goNext() { currentPage = page + 1; loadProjections(); }
+      topEl.querySelectorAll('.page-prev').forEach(function (b) { b.addEventListener('click', goPrev); });
+      topEl.querySelectorAll('.page-next').forEach(function (b) { b.addEventListener('click', goNext); });
+      bottomEl.querySelectorAll('.page-prev').forEach(function (b) { b.addEventListener('click', goPrev); });
+      bottomEl.querySelectorAll('.page-next').forEach(function (b) { b.addEventListener('click', goNext); });
     }
 
     async function loadProjections() {
@@ -220,7 +271,23 @@
         const qs = getParams().toString();
         const res = await fetch(API + '/api/projections' + (qs ? '?' + qs : ''));
         if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
+        const raw = await res.json();
+        var data, total, page, pageSize;
+        if (raw && typeof raw.items !== 'undefined') {
+          data = raw.items;
+          total = raw.total;
+          page = raw.page;
+          pageSize = raw.page_size;
+          renderPagination(total, page, pageSize);
+        } else {
+          data = Array.isArray(raw) ? raw : [];
+          total = data.length;
+          page = 1;
+          pageSize = 0;
+          var allText = total ? 'Showing all ' + total : '';
+          document.getElementById('topPagination').innerHTML = allText;
+          document.getElementById('bottomPagination').innerHTML = '';
+        }
         currentProjections = data;
         status.textContent = '';
         table.style.display = 'table';
@@ -497,10 +564,11 @@
     }
 
     document.getElementById('btnRefresh').addEventListener('click', loadProjections);
-    document.getElementById('statType').addEventListener('change', loadProjections);
-    document.getElementById('streakGames').addEventListener('change', loadProjections);
+    document.getElementById('statType').addEventListener('change', function () { currentPage = 1; loadProjections(); });
+    document.getElementById('streakGames').addEventListener('change', function () { currentPage = 1; loadProjections(); });
+    document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; loadProjections(); });
     document.querySelectorAll('input[name="sport"]').forEach(function (cb) {
-      cb.addEventListener('change', loadProjections);
+      cb.addEventListener('change', function () { currentPage = 1; loadProjections(); });
     });
     document.getElementById('btnUpdateProjections').addEventListener('click', updateProjections);
     document.getElementById('btnUpdateUnderdog').addEventListener('click', updateUnderdog);

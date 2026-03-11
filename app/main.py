@@ -105,8 +105,10 @@ def list_projections(
     league_ids: str | None = Query(None, description="Comma-separated PrizePicks league_ids (e.g. 7,9,82 for NBA, NFL, Soccer)"),
     include_all_odds: bool = Query(False, description="Include all odds types (standard, demon, goblin) for modals"),
     player_name: str | None = Query(None, description="Filter to one player (e.g. for modal)"),
+    page: int = Query(1, ge=1, description="Page number (used when page_size > 0)"),
+    page_size: int = Query(0, ge=0, le=500, description="Rows per page; 0 = return all (no paging)"),
 ):
-    """Return PrizePicks projections with favored/risk from last N games."""
+    """Return PrizePicks projections with favored/risk from last N games. When page_size > 0, returns { items, total, page, page_size }."""
     conn = None
     try:
         if league_ids and league_ids.strip():
@@ -147,6 +149,12 @@ def list_projections(
             row["line_underdog"] = underdog_map.get(key)
             row["line_parlay_play"] = parlay_play_map.get(key)
             out.append(row)
+        if page_size > 0:
+            total = len(out)
+            start = (page - 1) * page_size
+            end = start + page_size
+            items = out[start:end]
+            return {"items": items, "total": total, "page": page, "page_size": page_size}
         return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
