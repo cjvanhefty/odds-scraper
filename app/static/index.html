@@ -68,6 +68,7 @@
     .chart-bar-seg.on-line { background: var(--muted); }
     .chart-label-date { font-size: 0.7rem; color: var(--muted); text-align: center; margin-top: 0.25rem; display: block; }
     .chart-label-value { font-size: 0.7rem; font-weight: 600; color: var(--text); text-align: center; margin-top: 0.15rem; display: block; }
+    .chart-label-opponent { font-size: 0.65rem; color: var(--muted); text-align: center; margin-top: 0.1rem; display: block; }
     .chart-legend { margin-top: 0.5rem; }
     .chart-y-axis { font-size: 0.7rem; color: var(--muted); }
   </style>
@@ -383,18 +384,21 @@
 
     function updateChartForLine(primaryLine) {
       var state = statDetailState;
-      var values = state.values;
-      var dates = state.dates;
+      var values = state.values.slice().reverse();
+      var dates = state.dates.slice().reverse();
+      var opponents = (state.opponents || []).slice().reverse();
       var maxVal = state.maxVal;
       if (values.length === 0) return;
       var linePct = primaryLine != null ? (primaryLine / maxVal) * 100 : 0;
       var columnsHtml = values.map(function (val, i) {
         var label = dates[i] ? (dates[i].length >= 10 ? dates[i].slice(0, 10) : dates[i]) : 'G' + (i + 1);
+        var opp = opponents[i] ? String(opponents[i]).trim() : '';
         var barHeightPct = (val / maxVal) * 100;
         var tip = val + (primaryLine != null ? ' (line ' + primaryLine + ')' : '');
         var onLine = primaryLine != null && Math.abs(val - primaryLine) < 0.01;
         var over = primaryLine != null && val > primaryLine;
         var barClass = onLine ? 'on-line' : (over ? 'over' : 'under');
+        var opponentHtml = opp ? '<span class="chart-label-opponent">' + escapeHtml(opp) + '</span>' : '';
         return '<div class="chart-column">' +
           '<div class="chart-bar-wrap">' +
           '<div class="chart-bar-outer" style="height: ' + Math.max(4, barHeightPct) + '%;" data-label="' + escapeHtml(label) + '" data-val="' + val + '">' +
@@ -403,6 +407,7 @@
           '</div>' +
           '<span class="chart-label-date">' + escapeHtml(label) + '</span>' +
           '<span class="chart-label-value">' + val + '</span>' +
+          opponentHtml +
           '</div>';
       }).join('');
       var lineHtml = (primaryLine != null && linePct > 0 && linePct <= 100)
@@ -414,20 +419,26 @@
 
     function showStatDetail(rows) {
       if (!rows || rows.length === 0) return;
-      var first = rows[0];
+      var rowsByLine = rows.slice().sort(function (a, b) {
+        var la = a.line_score != null ? Number(a.line_score) : -Infinity;
+        var lb = b.line_score != null ? Number(b.line_score) : -Infinity;
+        return la - lb;
+      });
+      var first = rowsByLine[0];
       var statName = first.stat_type_name || '';
       document.getElementById('chartStatName').textContent = statName + ' — last 5 games';
 
       var values = first.last_n_values || [];
       var dates = first.last_n_dates || [];
-      var lines = rows.map(function (r) { return r.line_score != null ? Number(r.line_score) : null; }).filter(Boolean);
+      var opponents = first.last_n_opponents || [];
+      var lines = rowsByLine.map(function (r) { return r.line_score != null ? Number(r.line_score) : null; }).filter(Boolean);
       var maxLine = lines.length ? Math.max.apply(null, lines) : 0;
       var maxVal = Math.max(maxLine, values.length ? Math.max.apply(null, values) : 0);
       if (maxVal <= 0) maxVal = 1;
-      statDetailState = { rows: rows, values: values, dates: dates, maxVal: maxVal, lines: lines };
+      statDetailState = { rows: rowsByLine, values: values, dates: dates, opponents: opponents, maxVal: maxVal, lines: lines };
 
       var primaryLine = first.line_score != null ? Number(first.line_score) : (lines[0] || 0);
-      var oddsHtml = rows.map(function (r, idx) {
+      var oddsHtml = rowsByLine.map(function (r, idx) {
         var line = r.line_score != null ? Number(r.line_score) : '';
         var tagLine = r.line_score != null ? Number(r.line_score) : '';
         var isSelected = (idx === 0) || (tagLine === primaryLine && primaryLine != null);

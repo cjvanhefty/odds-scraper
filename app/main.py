@@ -149,6 +149,18 @@ def list_projections(
             row["line_underdog"] = underdog_map.get(key)
             row["line_parlay_play"] = parlay_play_map.get(key)
             out.append(row)
+        # One row per player (earliest game): when not loading modal, dedupe by display_name so each player appears once
+        if not (player_name and player_name.strip()):
+            out.sort(key=lambda r: (r.get("start_time") or "", (r.get("display_name") or r.get("pp_name") or "")))
+            seen_players: set[str] = set()
+            deduped: list[dict] = []
+            for row in out:
+                name = (row.get("display_name") or row.get("pp_name") or "").strip()
+                if name in seen_players:
+                    continue
+                seen_players.add(name)
+                deduped.append(row)
+            out = deduped
         if page_size > 0:
             total = len(out)
             start = (page - 1) * page_size

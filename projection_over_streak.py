@@ -134,7 +134,7 @@ def get_projections(
           AND p.player_id IS NOT NULL
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
           AND p.league_id IN ({placeholders})
-          AND p.start_time > GETUTCDATE()
+          AND p.start_time >= CAST(GETUTCDATE() AS DATE)
         ORDER BY p.stat_type_name, pp.display_name, p.line_score
         """
         cursor = conn.cursor()
@@ -157,7 +157,7 @@ def get_projections(
         WHERE p.player_id IS NOT NULL
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
           AND p.league_id IN ({placeholders})
-          AND p.start_time > GETUTCDATE()
+          AND p.start_time >= CAST(GETUTCDATE() AS DATE)
         ORDER BY pp.display_name, p.stat_type_name, p.odds_type, p.line_score
         """
         cursor = conn.cursor()
