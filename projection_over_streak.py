@@ -126,7 +126,13 @@ def get_projections(
             p.description,
             CONVERT(NVARCHAR(50), p.start_time, 127) AS start_time,
             pp.display_name,
-            pp.name AS pp_name
+            pp.name AS pp_name,
+            pp.team,
+            pp.team_name,
+            pp.position,
+            pp.jersey_number,
+            pp.league,
+            pp.image_url
         FROM [dbo].[prizepicks_projection] p
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
@@ -134,7 +140,7 @@ def get_projections(
           AND p.player_id IS NOT NULL
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
           AND p.league_id IN ({placeholders})
-          AND p.start_time >= CAST(GETUTCDATE() AS DATE)
+          AND p.start_time >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
         ORDER BY p.stat_type_name, pp.display_name, p.line_score
         """
         cursor = conn.cursor()
@@ -150,14 +156,20 @@ def get_projections(
             p.description,
             CONVERT(NVARCHAR(50), p.start_time, 127) AS start_time,
             pp.display_name,
-            pp.name AS pp_name
+            pp.name AS pp_name,
+            pp.team,
+            pp.team_name,
+            pp.position,
+            pp.jersey_number,
+            pp.league,
+            pp.image_url
         FROM [dbo].[prizepicks_projection] p
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
         WHERE p.player_id IS NOT NULL
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
           AND p.league_id IN ({placeholders})
-          AND p.start_time >= CAST(GETUTCDATE() AS DATE)
+          AND p.start_time >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
         ORDER BY pp.display_name, p.stat_type_name, p.odds_type, p.line_score
         """
         cursor = conn.cursor()
@@ -230,29 +242,94 @@ def resolve_nba_player_ids(conn, use_api_fallback: bool = True, season: str = "2
     return {_normalize_name(k).lower(): v for k, v in raw.items()}
 
 
+def _opponent_from_matchup(matchup: str | None) -> str:
+    """Return opponent city abbreviation from NBA matchup (e.g. 'LAL @ MIL' -> 'MIL', 'MIL vs. LAL' -> 'MIL')."""
+    if not matchup or not isinstance(matchup, str):
+        return ""
+    s = matchup.strip()
+    if " vs. " in s:
+        return s.split(" vs. ")[0].strip()[:3]
+    if " @ " in s:
+        return s.split(" @ ")[-1].strip()[:3]
+    return s[:3] if len(s) >= 3 else s
+
+
 def get_last_n_stat_values(
     conn, nba_player_id: int, stat_column: str, n: int = 5
-) -> list[tuple[str, int]]:
-    """Return (game_date, stat_value) for the player's last n games, most recent first."""
+) -> list[tuple[str, int, str]]:
+    """Return (game_date, stat_value, opponent_abbrev) for the player's last n games, most recent first."""
     col = stat_column
     if col not in ("pts", "reb", "ast", "stl", "blk", "tov", "dreb", "oreb", "fg3m"):
         return []
     if n < 1:
         return []
     sql = f"""
-    SELECT TOP (?) CAST(game_date AS VARCHAR(20)) AS game_date, [{col}] AS stat_value
+    SELECT TOP (?) CAST(game_date AS VARCHAR(20)) AS game_date, [{col}] AS stat_value, ISNULL(matchup, '') AS matchup
     FROM [dbo].[player_stat]
     WHERE player_id = ?
     ORDER BY game_date DESC
     """
     cursor = conn.cursor()
     cursor.execute(sql, (n, nba_player_id))
-    return [(r[0], int(r[1])) for r in cursor.fetchall()]
+    return [(r[0], int(r[1]), _opponent_from_matchup(r[2])) for r in cursor.fetchall()]
 
 
-def get_last_five_stat_values(conn, nba_player_id: int, stat_column: str) -> list[tuple[str, int]]:
-    """Return (game_date, stat_value) for the player's last 5 games, most recent first."""
+def get_last_five_stat_values(conn, nba_player_id: int, stat_column: str) -> list[tuple[str, int, str]]:
+    """Return (game_date, stat_value, opponent_abbrev) for the player's last 5 games, most recent first."""
     return get_last_n_stat_values(conn, nba_player_id, stat_column, 5)
+
+
+def get_historical_projection_lines(
+    conn,
+    pp_player_id: str | None,
+    stat_type_name: str,
+    game_dates: list[str],
+) -> list[float | None]:
+    """
+    Return PrizePicks line_score for each game_date from prizepicks_projection_history.
+    pp_player_id is the PrizePicks player_id (string). game_dates are date strings (e.g. '2026-03-03').
+    Returns one value per game_date in the same order; None where no history row exists.
+    Prefers odds_type = 'standard' when multiple rows exist for the same date.
+    """
+    if not pp_player_id or not stat_type_name or not game_dates:
+        return [None] * len(game_dates)
+    # Normalize dates to yyyy-mm-dd for comparison
+    date_set = set()
+    for d in game_dates:
+        if d:
+            dstr = str(d).strip()[:10]
+            if len(dstr) >= 10:
+                date_set.add(dstr)
+    if not date_set:
+        return [None] * len(game_dates)
+    placeholders = ",".join("?" * len(date_set))
+    sql = f"""
+    SELECT CONVERT(VARCHAR(10), start_time, 120) AS game_date, odds_type, line_score
+    FROM [dbo].[prizepicks_projection_history]
+    WHERE CAST(player_id AS NVARCHAR(20)) = ?
+      AND LTRIM(RTRIM(stat_type_name)) = ?
+      AND CONVERT(VARCHAR(10), start_time, 120) IN ({placeholders})
+    """
+    cursor = conn.cursor()
+    cursor.execute(sql, (str(pp_player_id).strip(), stat_type_name.strip(), *sorted(date_set)))
+    # Per date: prefer 'standard' odds_type, else first row
+    date_to_line: dict[str, float] = {}
+    for row in cursor.fetchall():
+        d, odds, line = (row[0] or "").strip()[:10], (row[1] or "").strip().lower(), row[2]
+        if not d or line is None:
+            continue
+        try:
+            line_f = float(line)
+        except (TypeError, ValueError):
+            continue
+        if d not in date_to_line or odds == "standard":
+            date_to_line[d] = line_f
+    # Return in same order as game_dates (normalize each to yyyy-mm-dd for lookup)
+    out = []
+    for d in game_dates:
+        dstr = (str(d).strip()[:10] if d else "") or ""
+        out.append(date_to_line.get(dstr) if len(dstr) >= 10 else None)
+    return out
 
 
 def _risk_from_cushion(cushion: float) -> str:
@@ -271,7 +348,7 @@ def enrich_projections_with_streak(
     streak_games: int = 5,
 ) -> list[dict]:
     """
-    Enrich each projection with favored, risk, cushion, last_n_values, last_n_dates.
+    Enrich each projection with favored, risk, cushion, last_n_values, last_n_dates, last_n_opponents.
     Does not close conn. Returns new list of dicts with added keys.
     """
     if streak_games < 1:
@@ -289,6 +366,8 @@ def enrich_projections_with_streak(
             row["cushion"] = None
             row["last_n_values"] = []
             row["last_n_dates"] = []
+            row["last_n_opponents"] = []
+            row["last_n_projection_lines"] = []
             row["streak_games"] = streak_games
             out.append(row)
             continue
@@ -300,6 +379,8 @@ def enrich_projections_with_streak(
             row["cushion"] = None
             row["last_n_values"] = []
             row["last_n_dates"] = []
+            row["last_n_opponents"] = []
+            row["last_n_projection_lines"] = []
             row["streak_games"] = streak_games
             out.append(row)
             continue
@@ -310,21 +391,32 @@ def enrich_projections_with_streak(
             row["cushion"] = None
             row["last_n_values"] = []
             row["last_n_dates"] = []
+            row["last_n_opponents"] = []
+            row["last_n_projection_lines"] = []
             row["streak_games"] = streak_games
             out.append(row)
             continue
         last_n = get_last_n_stat_values(conn, nba_id, stat_col, streak_games)
+        dates = [d for d, _, _ in last_n]
+        try:
+            hist_lines = get_historical_projection_lines(
+                conn, proj.get("pp_player_id"), stat_type, dates
+            )
+        except Exception:
+            hist_lines = [None] * len(dates) if dates else []
         if len(last_n) < streak_games:
             row["favored"] = False
             row["risk"] = None
             row["cushion"] = None
-            row["last_n_values"] = [v for _, v in last_n]
-            row["last_n_dates"] = [d for d, _ in last_n]
+            row["last_n_values"] = [v for _, v, _ in last_n]
+            row["last_n_dates"] = dates
+            row["last_n_opponents"] = [opp for _, _, opp in last_n]
+            row["last_n_projection_lines"] = hist_lines[: len(last_n)]
             row["streak_games"] = streak_games
             out.append(row)
             continue
-        values = [v for _, v in last_n]
-        dates = [d for d, _ in last_n]
+        values = [v for _, v, _ in last_n]
+        opponents = [opp for _, _, opp in last_n]
         all_over = all(v > line_val for v in values)
         min_val = min(values)
         cushion = min_val - line_val
@@ -333,6 +425,8 @@ def enrich_projections_with_streak(
         row["cushion"] = round(cushion, 2) if all_over else None
         row["last_n_values"] = values
         row["last_n_dates"] = dates
+        row["last_n_opponents"] = opponents
+        row["last_n_projection_lines"] = hist_lines
         row["streak_games"] = streak_games
         out.append(row)
     return out
@@ -408,7 +502,7 @@ def run(
         last5 = get_last_five_stat_values(conn, nba_id, stat_col)
         if len(last5) < 5:
             continue
-        values = [v for _, v in last5]
+        values = [v for _, v, _ in last5]
         if not all(v > line_val for v in values):
             continue
 
@@ -417,7 +511,7 @@ def run(
             "player_name": display_name,
             "line_score": line_val,
             "last_5_values": values,
-            "last_5_dates": [d for d, _ in last5],
+            "last_5_dates": [d for d, _, _ in last5],
             "description": proj.get("description"),
             "start_time": proj.get("start_time"),
         })

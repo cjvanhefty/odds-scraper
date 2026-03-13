@@ -37,13 +37,23 @@
     .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: none; align-items: center; justify-content: center; padding: 1rem; }
     .modal-backdrop.open { display: flex; }
     .modal-box { background: var(--card); border-radius: 12px; max-width: 560px; width: 100%; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
-    .modal-header { padding: 1rem 1.25rem; border-bottom: 1px solid #2d323a; display: flex; justify-content: space-between; align-items: center; }
+    .modal-header { padding: 1rem 1.25rem; border-bottom: 1px solid #2d323a; display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; }
+    .modal-title-wrap { display: flex; align-items: center; gap: 0.75rem; min-width: 0; flex: 1; }
+    .modal-player-img { width: 48px; height: 48px; border-radius: 50%; object-fit: cover; background: #2d323a; flex-shrink: 0; }
+    .modal-player-img.hidden { display: none; }
     .modal-title { font-size: 1.25rem; font-weight: 600; margin: 0; }
     .modal-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.5rem; line-height: 1; padding: 0.25rem; }
     .modal-close:hover { color: var(--text); }
     .modal-body { padding: 1rem 1.25rem; overflow-y: auto; }
     .modal-body h3 { font-size: 0.9rem; color: var(--muted); margin: 0 0 0.5rem 0; }
-    .modal-stats-list-wrap { max-height: 120px; overflow-y: auto; overflow-x: hidden; margin-bottom: 0.75rem; flex-shrink: 0; }
+    .modal-player-info { display: none; padding: 0.875rem 1rem; margin: 0 -1.25rem 1rem -1.25rem; padding-left: 1.25rem; padding-right: 1.25rem; background: rgba(0,0,0,0.2); border-bottom: 1px solid #2d323a; }
+    .modal-player-info.visible { display: block; }
+    .modal-player-info-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.5rem 0; }
+    .modal-player-info-grid { display: grid; grid-template-columns: auto 1fr; column-gap: 1rem; row-gap: 0.35rem; align-items: baseline; font-size: 0.9rem; }
+    .modal-info-label { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+    .modal-info-value { color: var(--text); font-weight: 500; }
+    .modal-stats-list-wrap { max-height: 120px; overflow-y: auto; overflow-x: hidden; flex-shrink: 0; margin-bottom: 0.5rem; }
+    .modal-stats-list-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.4rem 0; }
     .modal-stats-list { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .stat-row { padding: 0.35rem 0.5rem; border: 1px solid #2d323a; cursor: pointer; border-radius: 6px; flex-shrink: 0; }
     .stat-row:hover { background: #2d323a; }
@@ -60,6 +70,9 @@
     .chart-column { flex: 1; max-width: 72px; min-width: 0; display: flex; flex-direction: column; align-items: center; }
     .chart-line-layer { position: absolute; left: 0; right: 0; top: 0; height: 180px; pointer-events: none; z-index: 2; }
     .chart-projection-line { position: absolute; left: 0; right: 0; height: 2px; background: var(--warn); }
+    .chart-historical-line-layer { position: absolute; left: 0; right: 0; top: 0; height: 180px; pointer-events: none; z-index: 1; }
+    .chart-historical-line-layer svg { width: 100%; height: 100%; display: block; }
+    .chart-historical-line { fill: none; stroke: #06b6d4; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .chart-bar-wrap { width: 100%; height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
     .chart-bar-outer { width: 80%; max-width: 48px; min-height: 4px; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 4px 4px 0 0; overflow: hidden; }
     .chart-bar-seg { width: 100%; min-height: 2px; transition: height 0.2s; }
@@ -69,6 +82,7 @@
     .chart-label-date { font-size: 0.7rem; color: var(--muted); text-align: center; margin-top: 0.25rem; display: block; }
     .chart-label-value { font-size: 0.7rem; font-weight: 600; color: var(--text); text-align: center; margin-top: 0.15rem; display: block; }
     .chart-label-opponent { font-size: 0.65rem; color: var(--muted); text-align: center; margin-top: 0.1rem; display: block; }
+    .chart-label-projection { font-size: 0.65rem; color: var(--warn); text-align: center; margin-top: 0.1rem; display: block; }
     .chart-legend { margin-top: 0.5rem; }
     .chart-y-axis { font-size: 0.7rem; color: var(--muted); }
   </style>
@@ -174,12 +188,20 @@
   <div class="modal-backdrop" id="playerModal">
     <div class="modal-box">
       <div class="modal-header">
-        <h2 class="modal-title" id="modalPlayerName"></h2>
+        <div class="modal-title-wrap">
+          <img class="modal-player-img hidden" id="modalPlayerImg" src="" alt="" />
+          <h2 class="modal-title" id="modalPlayerName"></h2>
+        </div>
         <button type="button" class="modal-close" id="modalClose" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
         <p id="modalStatus">Loading...</p>
+        <div class="modal-player-info" id="modalPlayerInfo">
+          <p class="modal-player-info-title">Player &amp; game</p>
+          <div class="modal-player-info-grid" id="modalPlayerInfoGrid"></div>
+        </div>
         <div class="modal-stats-list-wrap" id="modalStatsListWrap" style="display: none;">
+          <p class="modal-stats-list-title">Stat</p>
           <div id="modalStatsList" class="modal-stats-list"></div>
         </div>
         <div class="chart-wrap" id="modalChartWrap" style="display: none;">
@@ -316,8 +338,13 @@
       const statsList = document.getElementById('modalStatsList');
       const statDetail = document.getElementById('modalStatDetail');
       title.textContent = playerName;
+      var imgEl = document.getElementById('modalPlayerImg');
+      imgEl.classList.add('hidden');
+      imgEl.removeAttribute('src');
+      imgEl.setAttribute('alt', playerName);
       document.getElementById('modalChartWrap').style.display = 'none';
       document.getElementById('modalStatsListWrap').style.display = 'none';
+      document.getElementById('modalPlayerInfo').classList.remove('visible');
       statDetail.style.display = 'none';
       status.style.display = 'block';
       status.textContent = 'Loading...';
@@ -336,6 +363,36 @@
         document.getElementById('modalStatsListWrap').style.display = 'block';
         document.getElementById('modalChartWrap').style.display = 'block';
         statDetail.style.display = 'block';
+
+        var first = list[0];
+        var imgEl = document.getElementById('modalPlayerImg');
+        if (first && first.image_url && (first.image_url + '').trim()) {
+          imgEl.src = (first.image_url + '').trim();
+          imgEl.alt = (first.display_name || first.pp_name || '').trim() || 'Player';
+          imgEl.classList.remove('hidden');
+        } else {
+          imgEl.classList.add('hidden');
+          imgEl.removeAttribute('src');
+        }
+        var infoEl = document.getElementById('modalPlayerInfo');
+        var gridEl = document.getElementById('modalPlayerInfoGrid');
+        if (first && infoEl && gridEl) {
+          var team = (first.team || first.team_name || '').trim();
+          var teamName = (first.team_name || '').trim();
+          if (team && teamName && team !== teamName) team = team + ' – ' + teamName;
+          else if (!team && teamName) team = teamName;
+          var matchup = (first.description || '').trim();
+          var startTime = first.start_time ? new Date(first.start_time).toLocaleString() : '';
+          var rows = [];
+          if (team) rows.push('<span class="modal-info-label">Team</span><span class="modal-info-value">' + escapeHtml(team) + '</span>');
+          if (first.position) rows.push('<span class="modal-info-label">Position</span><span class="modal-info-value">' + escapeHtml(String(first.position).trim()) + '</span>');
+          if (first.jersey_number != null && String(first.jersey_number).trim() !== '') rows.push('<span class="modal-info-label">Number</span><span class="modal-info-value">' + escapeHtml(String(first.jersey_number).trim()) + '</span>');
+          if (matchup) rows.push('<span class="modal-info-label">Matchup</span><span class="modal-info-value">' + escapeHtml(matchup) + '</span>');
+          if (startTime) rows.push('<span class="modal-info-label">Game time</span><span class="modal-info-value">' + escapeHtml(startTime) + '</span>');
+          if (first.league) rows.push('<span class="modal-info-label">League</span><span class="modal-info-value">' + escapeHtml(String(first.league).trim()) + '</span>');
+          gridEl.innerHTML = rows.join('');
+          infoEl.classList.toggle('visible', rows.length > 0);
+        }
 
         var byStat = {};
         list.forEach(function (r) {
@@ -380,21 +437,26 @@
       }
     }
 
-    var statDetailState = { rows: null, values: [], dates: [], maxVal: 1, lines: [] };
+    var statDetailState = { rows: null, values: [], dates: [], maxVal: 1, lines: [], projectionLines: [] };
 
     function updateChartForLine(primaryLine) {
       var state = statDetailState;
       var values = state.values.slice().reverse();
       var dates = state.dates.slice().reverse();
       var opponents = (state.opponents || []).slice().reverse();
+      var projectionLines = (state.projectionLines || []).slice().reverse();
       var maxVal = state.maxVal;
       if (values.length === 0) return;
       var linePct = primaryLine != null ? (primaryLine / maxVal) * 100 : 0;
       var columnsHtml = values.map(function (val, i) {
         var label = dates[i] ? (dates[i].length >= 10 ? dates[i].slice(0, 10) : dates[i]) : 'G' + (i + 1);
         var opp = opponents[i] ? String(opponents[i]).trim() : '';
+        var projLine = projectionLines[i];
+        var hasProj = projLine != null && projLine !== '' && !isNaN(Number(projLine));
+        var projVal = hasProj ? Number(projLine) : null;
         var barHeightPct = (val / maxVal) * 100;
         var tip = val + (primaryLine != null ? ' (line ' + primaryLine + ')' : '');
+        if (hasProj) tip += ' — PP line ' + projVal;
         var onLine = primaryLine != null && Math.abs(val - primaryLine) < 0.01;
         var over = primaryLine != null && val > primaryLine;
         var barClass = onLine ? 'on-line' : (over ? 'over' : 'under');
@@ -407,13 +469,32 @@
           '</div>' +
           '<span class="chart-label-date">' + escapeHtml(label) + '</span>' +
           '<span class="chart-label-value">' + val + '</span>' +
+          (hasProj ? '<span class="chart-label-projection">Line ' + escapeHtml(String(projVal)) + '</span>' : '') +
           opponentHtml +
           '</div>';
       }).join('');
       var lineHtml = (primaryLine != null && linePct > 0 && linePct <= 100)
         ? '<div class="chart-line-layer"><div class="chart-projection-line" style="bottom: ' + linePct + '%;" title="Projection: ' + primaryLine + '"></div></div>'
         : '';
-      document.getElementById('chartBars').innerHTML = lineHtml + columnsHtml;
+      var historicalPathD = '';
+      var n = values.length;
+      if (n > 0) {
+        var points = [];
+        for (var idx = 0; idx < projectionLines.length; idx++) {
+          var p = projectionLines[idx];
+          if (p != null && p !== '' && !isNaN(Number(p))) points.push({ i: idx, v: Number(p) });
+        }
+        for (var k = 0; k < points.length; k++) {
+          var x = (points[k].i + 0.5) / n * 100;
+          var y = 100 * (1 - points[k].v / maxVal);
+          if (k === 0 || points[k].i !== points[k - 1].i + 1) historicalPathD += ' M ' + x + ' ' + y;
+          else historicalPathD += ' L ' + x + ' ' + y;
+        }
+      }
+      var historicalLineHtml = historicalPathD
+        ? '<div class="chart-historical-line-layer"><svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="chart-historical-line" d="' + historicalPathD.trim() + '" title="Historical PP line by game"/></svg></div>'
+        : '';
+      document.getElementById('chartBars').innerHTML = historicalLineHtml + lineHtml + columnsHtml;
       document.getElementById('chartLegend').innerHTML = '';
     }
 
@@ -431,11 +512,12 @@
       var values = first.last_n_values || [];
       var dates = first.last_n_dates || [];
       var opponents = first.last_n_opponents || [];
+      var projectionLines = first.last_n_projection_lines || [];
       var lines = rowsByLine.map(function (r) { return r.line_score != null ? Number(r.line_score) : null; }).filter(Boolean);
       var maxLine = lines.length ? Math.max.apply(null, lines) : 0;
       var maxVal = Math.max(maxLine, values.length ? Math.max.apply(null, values) : 0);
       if (maxVal <= 0) maxVal = 1;
-      statDetailState = { rows: rowsByLine, values: values, dates: dates, opponents: opponents, maxVal: maxVal, lines: lines };
+      statDetailState = { rows: rowsByLine, values: values, dates: dates, opponents: opponents, maxVal: maxVal, lines: lines, projectionLines: projectionLines };
 
       var primaryLine = first.line_score != null ? Number(first.line_score) : (lines[0] || 0);
       var oddsHtml = rowsByLine.map(function (r, idx) {

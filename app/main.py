@@ -97,6 +97,38 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+def _get_projections_count(league_id: int, league_ids: str | None):
+    """Shared logic for projection count."""
+    if league_ids and league_ids.strip():
+        try:
+            league_id_list = [int(x.strip()) for x in league_ids.split(",") if x.strip()]
+        except ValueError:
+            league_id_list = [7]
+    else:
+        league_id_list = [league_id]
+    conn = None
+    try:
+        conn = get_conn()
+        projections = get_projections(conn, league_id=league_id_list, odds_type="standard")
+        return {"count": len(projections), "league_ids": league_id_list}
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.get("/api/projections/count")
+@app.get("/api/projections-count")
+def get_projections_count(
+    league_id: int = Query(7, description="League id (7=NBA). Ignored if league_ids set."),
+    league_ids: str | None = Query(None, description="Comma-separated league_ids"),
+):
+    """Return how many projection rows are in the DB (same date/league filter as list). Use to confirm data is loaded."""
+    try:
+        return _get_projections_count(league_id, league_ids)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/projections")
 def list_projections(
     stat_type: str | None = Query(None, description="Filter by stat type (e.g. Points, Rebounds)"),
@@ -149,9 +181,17 @@ def list_projections(
             row["line_underdog"] = underdog_map.get(key)
             row["line_parlay_play"] = parlay_play_map.get(key)
             out.append(row)
-        # One row per player (earliest game): when not loading modal, dedupe by display_name so each player appears once
+        # One row per player (earliest game): when not loading modal, dedupe by display_name so each player appears once.
+        # Sort by start_time, then display_name, then stat_type_name/projection_id so the same row is chosen regardless of streak_games.
         if not (player_name and player_name.strip()):
-            out.sort(key=lambda r: (r.get("start_time") or "", (r.get("display_name") or r.get("pp_name") or "")))
+            out.sort(
+                key=lambda r: (
+                    r.get("start_time") or "",
+                    (r.get("display_name") or r.get("pp_name") or "").strip(),
+                    (r.get("stat_type_name") or "").strip(),
+                    str(r.get("projection_id") or ""),
+                )
+            )
             seen_players: set[str] = set()
             deduped: list[dict] = []
             for row in out:
