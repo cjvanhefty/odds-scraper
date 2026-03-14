@@ -11,7 +11,7 @@ last5 AS (
     SELECT
         player_id,
         game_date,
-        pts, reb, ast, stl, blk, tov, dreb, oreb, fg3m,
+        pts, reb, ast, stl, blk, tov, dreb, oreb, fg3m, fg3a, fgm, fga, pf, ftm, fta,
         ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_date DESC) AS rn
     FROM [dbo].[player_stat]
 ),
@@ -57,18 +57,34 @@ game_values AS (
             WHEN N'Assists' THEN l.ast
             WHEN N'Steals' THEN l.stl
             WHEN N'Blocks' THEN l.blk
+            WHEN N'Blocked Shots' THEN l.blk
             WHEN N'Turnovers' THEN l.tov
             WHEN N'Defensive Rebounds' THEN l.dreb
             WHEN N'Offensive Rebounds' THEN l.oreb
             WHEN N'3 Pointers Made' THEN l.fg3m
             WHEN N'3 Pointers' THEN l.fg3m
+            WHEN N'FG Made' THEN l.fgm
+            WHEN N'FG Attempted' THEN l.fga
+            WHEN N'Personal Fouls' THEN l.pf
+            WHEN N'Blks+Stls' THEN l.blk + l.stl
+            WHEN N'Free Throws Made' THEN l.ftm
+            WHEN N'Free Throws Attempted' THEN l.fta
+            WHEN N'Pts+Asts' THEN l.pts + l.ast
+            WHEN N'Pts+Rebs' THEN l.pts + l.reb
+            WHEN N'Pts+Rebs+Asts' THEN l.pts + l.reb + l.ast
+            WHEN N'Rebs+Asts' THEN l.reb + l.ast
+            WHEN N'Two Pointers Made' THEN l.fgm - l.fg3m
+            WHEN N'Two Pointers Attempted' THEN l.fga - l.fg3a
             ELSE NULL
         END AS stat_value
     FROM proj
     INNER JOIN last5_only l ON l.player_id = proj.nba_player_id
     WHERE proj.stat_type_name IN (
-        N'Points', N'Rebounds', N'Assists', N'Steals', N'Blocks', N'Turnovers',
-        N'Defensive Rebounds', N'Offensive Rebounds', N'3 Pointers Made', N'3 Pointers'
+        N'Points', N'Rebounds', N'Assists', N'Steals', N'Blocks', N'Blocked Shots', N'Turnovers',
+        N'Defensive Rebounds', N'Offensive Rebounds', N'3 Pointers Made', N'3 Pointers',
+        N'FG Made', N'FG Attempted', N'Personal Fouls', N'Blks+Stls',
+        N'Free Throws Made', N'Free Throws Attempted',         N'Pts+Asts', N'Pts+Rebs', N'Pts+Rebs+Asts', N'Rebs+Asts',
+        N'Two Pointers Made', N'Two Pointers Attempted'
     )
 ),
 -- Only projections where we have exactly 5 games and all stat_value > line_score

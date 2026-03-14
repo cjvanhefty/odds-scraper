@@ -14,18 +14,31 @@ import os
 import re
 from collections import defaultdict
 
-# PrizePicks stat_type_name -> player_stat column name (single-player stats only)
+# PrizePicks stat_type_name -> player_stat column name(s). Single str = one column; tuple = sum of columns.
 STAT_COLUMN_MAP = {
     "Points": "pts",
     "Rebounds": "reb",
     "Assists": "ast",
     "Steals": "stl",
     "Blocks": "blk",
+    "Blocked Shots": "blk",
     "Turnovers": "tov",
     "Defensive Rebounds": "dreb",
     "Offensive Rebounds": "oreb",
     "3 Pointers Made": "fg3m",
     "3 Pointers": "fg3m",
+    "FG Made": "fgm",
+    "FG Attempted": "fga",
+    "Personal Fouls": "pf",
+    "Blks+Stls": ("blk", "stl"),
+    "Free Throws Made": "ftm",
+    "Free Throws Attempted": "fta",
+    "Pts+Asts": ("pts", "ast"),
+    "Pts+Rebs": ("pts", "reb"),
+    "Pts+Rebs+Asts": ("pts", "reb", "ast"),
+    "Rebs+Asts": ("reb", "ast"),
+    "Two Pointers Made": ("fgm", "fg3m", "sub"),      # fgm - fg3m
+    "Two Pointers Attempted": ("fga", "fg3a", "sub"),  # fga - fg3a
 }
 
 
@@ -106,15 +119,18 @@ def get_projections(
     conn,
     league_id: int | list[int] = 7,
     odds_type: str | None = "standard",
+    active_only: bool = False,
 ) -> list[dict]:
     """Return single-player projections with PrizePicks display_name.
     If odds_type is None, return all odds types (standard, demon, goblin, etc.).
     league_id can be a single int or a list of ints (multiple sports).
+    If active_only is True, only return projections where start_time >= current time (not yet started).
     """
     league_ids = [league_id] if isinstance(league_id, int) else league_id
     if not league_ids:
         return []
     placeholders = ",".join("?" * len(league_ids))
+    active_clause = " AND p.start_time >= GETUTCDATE()" if active_only else ""
     if odds_type is not None:
         sql = f"""
         SELECT
@@ -141,6 +157,7 @@ def get_projections(
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
           AND p.league_id IN ({placeholders})
           AND p.start_time >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
+          {active_clause}
         ORDER BY p.stat_type_name, pp.display_name, p.line_score
         """
         cursor = conn.cursor()
@@ -170,6 +187,7 @@ def get_projections(
           AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
           AND p.league_id IN ({placeholders})
           AND p.start_time >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
+          {active_clause}
         ORDER BY pp.display_name, p.stat_type_name, p.odds_type, p.line_score
         """
         cursor = conn.cursor()
@@ -255,16 +273,35 @@ def _opponent_from_matchup(matchup: str | None) -> str:
 
 
 def get_last_n_stat_values(
-    conn, nba_player_id: int, stat_column: str, n: int = 5
+    conn, nba_player_id: int, stat_column: str | tuple[str, ...], n: int = 5
 ) -> list[tuple[str, int, str]]:
-    """Return (game_date, stat_value, opponent_abbrev) for the player's last n games, most recent first."""
-    col = stat_column
-    if col not in ("pts", "reb", "ast", "stl", "blk", "tov", "dreb", "oreb", "fg3m"):
-        return []
+    """Return (game_date, stat_value, opponent_abbrev) for the player's last n games, most recent first.
+    stat_column may be a single column name; a tuple of columns (summed per game); or (col1, col2, 'sub') for col1 - col2.
+    """
     if n < 1:
         return []
+    allowed = ("pts", "reb", "ast", "stl", "blk", "tov", "dreb", "oreb", "fg3m", "fg3a", "fgm", "fga", "pf", "ftm", "fta")
+    if isinstance(stat_column, str):
+        cols = [stat_column]
+        sub = False
+    else:
+        t = tuple(stat_column)
+        if len(t) == 3 and t[2] == "sub":
+            cols = [t[0], t[1]]
+            sub = True
+        else:
+            cols = list(t)
+            sub = False
+    if not cols or any(c not in allowed for c in cols):
+        return []
+    if sub and len(cols) == 2:
+        expr = f"[{cols[0]}] - [{cols[1]}]"
+    elif len(cols) == 1:
+        expr = f"[{cols[0]}]"
+    else:
+        expr = " + ".join(f"[{c}]" for c in cols)
     sql = f"""
-    SELECT TOP (?) CAST(game_date AS VARCHAR(20)) AS game_date, [{col}] AS stat_value, ISNULL(matchup, '') AS matchup
+    SELECT TOP (?) CAST(game_date AS VARCHAR(20)) AS game_date, ({expr}) AS stat_value, ISNULL(matchup, '') AS matchup
     FROM [dbo].[player_stat]
     WHERE player_id = ?
     ORDER BY game_date DESC
@@ -396,7 +433,19 @@ def enrich_projections_with_streak(
             row["streak_games"] = streak_games
             out.append(row)
             continue
-        last_n = get_last_n_stat_values(conn, nba_id, stat_col, streak_games)
+        try:
+            last_n = get_last_n_stat_values(conn, nba_id, stat_col, streak_games)
+        except Exception:
+            row["favored"] = False
+            row["risk"] = None
+            row["cushion"] = None
+            row["last_n_values"] = []
+            row["last_n_dates"] = []
+            row["last_n_opponents"] = []
+            row["last_n_projection_lines"] = []
+            row["streak_games"] = streak_games
+            out.append(row)
+            continue
         dates = [d for d, _, _ in last_n]
         try:
             hist_lines = get_historical_projection_lines(
