@@ -106,6 +106,12 @@
   </div>
 
   <div class="section">
+    <h2>Stat</h2>
+    <p class="modal-stats-list-title" style="margin: 0 0 0.4rem 0;">Filter by stat type</p>
+    <div id="mainStatList" class="modal-stats-list"></div>
+  </div>
+
+  <div class="section">
     <h2>Update data</h2>
     <div class="controls">
       <button type="button" class="btn" id="btnUpdateProjections">Update PrizePicks</button>
@@ -121,22 +127,6 @@
   </div>
 
   <div class="controls">
-    <label>
-      Stat:
-      <select id="statType">
-        <option value="">All</option>
-        <option value="Points">Points</option>
-        <option value="Rebounds">Rebounds</option>
-        <option value="Assists">Assists</option>
-        <option value="Steals">Steals</option>
-        <option value="Blocks">Blocks</option>
-        <option value="Turnovers">Turnovers</option>
-        <option value="Defensive Rebounds">Defensive Rebounds</option>
-        <option value="Offensive Rebounds">Offensive Rebounds</option>
-        <option value="3 Pointers Made">3 Pointers Made</option>
-        <option value="3 Pointers">3 Pointers</option>
-      </select>
-    </label>
     <label>
       Streak (games):
       <select id="streakGames">
@@ -220,6 +210,7 @@
   <script>
     const API = '';
     let currentProjections = [];
+    var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
 
     function getSelectedLeagueIds() {
       const checkboxes = document.querySelectorAll('input[name="sport"]:checked');
@@ -230,19 +221,46 @@
     let currentPage = 1;
 
     function getParams() {
-      const stat = document.getElementById('statType').value;
       const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
       const leagueIds = getSelectedLeagueIds();
-      const pageSize = parseInt(document.getElementById('pageSize').value, 10) || 50;
       const params = new URLSearchParams();
-      if (stat) params.set('stat_type', stat);
+      params.set('full_list', 'true');
+      params.set('page_size', '0');
       params.set('streak_games', String(streak));
       if (leagueIds.length) params.set('league_ids', leagueIds.join(','));
-      if (pageSize > 0) {
-        params.set('page', String(currentPage));
-        params.set('page_size', String(pageSize));
-      }
       return params;
+    }
+
+    function getSelectedStat() {
+      const sel = document.querySelector('#mainStatList .stat-row.selected');
+      return sel ? (sel.getAttribute('data-stat') || '') : '';
+    }
+
+    function updateMainStatList() {
+      var listEl = document.getElementById('mainStatList');
+      if (!listEl) return;
+      var prevStat = getSelectedStat();
+      var seen = {};
+      var list = Array.isArray(currentProjections) ? currentProjections : [];
+      list.forEach(function (r) {
+        var s = (r.stat_type_name || '').trim();
+        if (s) seen[s] = true;
+      });
+      var statTypes = Object.keys(seen).sort(function (a, b) {
+        var i = statOrder.indexOf(a);
+        var j = statOrder.indexOf(b);
+        if (i !== -1 && j !== -1) return i - j;
+        if (i !== -1) return -1;
+        if (j !== -1) return 1;
+        return a.localeCompare(b);
+      });
+      var allSelected = prevStat === '' || statTypes.indexOf(prevStat) < 0;
+      var html = '<div class="stat-row' + (allSelected ? ' selected' : '') + '" data-stat=""><span class="stat-name">All</span></div>';
+      statTypes.forEach(function (s) {
+        var sel = prevStat === s ? ' selected' : '';
+        html += '<div class="stat-row' + sel + '" data-stat="' + escapeHtml(s) + '"><span class="stat-name">' + escapeHtml(s) + '</span></div>';
+      });
+      listEl.innerHTML = html;
     }
 
     function escapeHtml(s) {
@@ -251,7 +269,7 @@
       return div.innerHTML;
     }
 
-    function renderPagination(total, page, pageSize) {
+    function renderPagination(total, page, pageSize, onPageChange) {
       const topEl = document.getElementById('topPagination');
       const bottomEl = document.getElementById('bottomPagination');
       if (total === 0 || pageSize <= 0) {
@@ -272,12 +290,64 @@
       }
       topEl.innerHTML = html;
       bottomEl.innerHTML = html;
-      function goPrev() { currentPage = page - 1; loadProjections(); }
-      function goNext() { currentPage = page + 1; loadProjections(); }
+      var go = onPageChange || function (p) { currentPage = p; loadProjections(); };
+      function goPrev() { go(page - 1); }
+      function goNext() { go(page + 1); }
       topEl.querySelectorAll('.page-prev').forEach(function (b) { b.addEventListener('click', goPrev); });
       topEl.querySelectorAll('.page-next').forEach(function (b) { b.addEventListener('click', goNext); });
       bottomEl.querySelectorAll('.page-prev').forEach(function (b) { b.addEventListener('click', goPrev); });
       bottomEl.querySelectorAll('.page-next').forEach(function (b) { b.addEventListener('click', goNext); });
+    }
+
+    function renderTableFromCurrent() {
+      const table = document.getElementById('projectionsTable');
+      const body = document.getElementById('projectionsBody');
+      const stat = getSelectedStat();
+      const pageSize = parseInt(document.getElementById('pageSize').value, 10) || 50;
+      var filtered = Array.isArray(currentProjections) ? currentProjections : [];
+      if (stat) {
+        filtered = filtered.filter(function (r) { return (r.stat_type_name || '').trim() === stat; });
+      } else {
+        var byPlayer = {};
+        filtered.forEach(function (r) {
+          var name = (r.display_name || r.pp_name || '').trim();
+          if (!name) return;
+          var st = (r.stat_type_name || '').trim();
+          var order = statOrder.indexOf(st);
+          if (order < 0) order = 9999;
+          if (!byPlayer[name] || order < statOrder.indexOf((byPlayer[name].stat_type_name || '').trim())) {
+            byPlayer[name] = r;
+          }
+        });
+        filtered = Object.keys(byPlayer).map(function (k) { return byPlayer[k]; });
+        filtered.sort(function (a, b) {
+          var t = (a.start_time || '').localeCompare(b.start_time || '');
+          if (t !== 0) return t;
+          return (a.display_name || a.pp_name || '').localeCompare(b.display_name || b.pp_name || '');
+        });
+      }
+      const total = filtered.length;
+      const totalPages = Math.ceil(total / pageSize) || 1;
+      if (currentPage > totalPages && totalPages > 0) currentPage = totalPages;
+      if (currentPage < 1) currentPage = 1;
+      const start = (currentPage - 1) * pageSize;
+      const pageRows = filtered.slice(start, start + pageSize);
+      body.innerHTML = pageRows.map(function (r) {
+        const risk = r.risk ? '<span class="badge ' + (r.risk === 'Low' ? 'low' : r.risk === 'Medium' ? 'medium' : 'high') + '">' + r.risk + '</span>' : '—';
+        const favored = r.favored ? '<span class="favored">' + (r.streak_games || 5) + '/' + (r.streak_games || 5) + ' over</span>' : '—';
+        const startTime = r.start_time ? new Date(r.start_time).toLocaleString() : '—';
+        const linePP = r.line_score != null ? Number(r.line_score) : '—';
+        const lineUD = r.line_underdog != null ? Number(r.line_underdog) : '—';
+        const linePP2 = r.line_parlay_play != null ? Number(r.line_parlay_play) : '—';
+        const playerName = r.display_name || r.pp_name || '';
+        return '<tr><td><span class="player-link" data-player="' + escapeHtml(playerName) + '">' + escapeHtml(playerName) + '</span></td><td>' + startTime + '</td><td>' + escapeHtml(r.stat_type_name || '') + '</td><td>' + linePP + '</td><td>' + lineUD + '</td><td>' + linePP2 + '</td><td>' + risk + '</td><td>' + favored + '</td></tr>';
+      }).join('');
+      body.querySelectorAll('.player-link').forEach(function (el) {
+        el.addEventListener('click', function () { openPlayerModal(el.getAttribute('data-player')); });
+      });
+      renderPagination(total, currentPage, pageSize, function (p) { currentPage = p; renderTableFromCurrent(); });
+      document.getElementById('tableStatus').textContent = '';
+      table.style.display = 'table';
     }
 
     async function loadProjections() {
@@ -291,40 +361,19 @@
       try {
         const qs = getParams().toString();
         const res = await fetch(API + '/api/projections' + (qs ? '?' + qs : ''));
-        if (!res.ok) throw new Error(await res.text());
-        const raw = await res.json();
-        var data, total, page, pageSize;
-        if (raw && typeof raw.items !== 'undefined') {
-          data = raw.items;
-          total = raw.total;
-          page = raw.page;
-          pageSize = raw.page_size;
-          renderPagination(total, page, pageSize);
-        } else {
-          data = Array.isArray(raw) ? raw : [];
-          total = data.length;
-          page = 1;
-          pageSize = 0;
-          var allText = total ? 'Showing all ' + total : '';
-          document.getElementById('topPagination').innerHTML = allText;
-          document.getElementById('bottomPagination').innerHTML = '';
+        if (!res.ok) {
+          const body = await res.text();
+          let msg = body;
+          try {
+            const j = JSON.parse(body);
+            if (j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+          } catch (_) {}
+          throw new Error(msg || res.statusText);
         }
-        currentProjections = data;
-        status.textContent = '';
-        table.style.display = 'table';
-        body.innerHTML = data.map(function (r) {
-          const risk = r.risk ? '<span class="badge ' + (r.risk === 'Low' ? 'low' : r.risk === 'Medium' ? 'medium' : 'high') + '">' + r.risk + '</span>' : '—';
-          const favored = r.favored ? '<span class="favored">' + (r.streak_games || 5) + '/' + (r.streak_games || 5) + ' over</span>' : '—';
-          const start = r.start_time ? new Date(r.start_time).toLocaleString() : '—';
-          const linePP = r.line_score != null ? Number(r.line_score) : '—';
-          const lineUD = r.line_underdog != null ? Number(r.line_underdog) : '—';
-          const linePP2 = r.line_parlay_play != null ? Number(r.line_parlay_play) : '—';
-          const playerName = r.display_name || r.pp_name || '';
-          return '<tr><td><span class="player-link" data-player="' + escapeHtml(playerName) + '">' + escapeHtml(playerName) + '</span></td><td>' + start + '</td><td>' + escapeHtml(r.stat_type_name || '') + '</td><td>' + linePP + '</td><td>' + lineUD + '</td><td>' + linePP2 + '</td><td>' + risk + '</td><td>' + favored + '</td></tr>';
-        }).join('');
-        body.querySelectorAll('.player-link').forEach(function (el) {
-          el.addEventListener('click', function () { openPlayerModal(el.getAttribute('data-player')); });
-        });
+        const raw = await res.json();
+        currentProjections = Array.isArray(raw) ? raw : [];
+        renderTableFromCurrent();
+        updateMainStatList();
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
       }
@@ -351,10 +400,12 @@
       modal.classList.add('open');
 
       const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
+      const leagueIds = getSelectedLeagueIds();
       const params = new URLSearchParams();
       params.set('player_name', playerName);
       params.set('include_all_odds', 'true');
       params.set('streak_games', String(streak));
+      if (leagueIds.length) params.set('league_ids', leagueIds.join(','));
       try {
         const res = await fetch(API + '/api/projections?' + params.toString());
         if (!res.ok) throw new Error(await res.text());
@@ -400,7 +451,6 @@
           if (!byStat[stat]) byStat[stat] = [];
           byStat[stat].push(r);
         });
-        var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', '3 Pointers Made', '3 Pointers'];
         var stats = Object.keys(byStat).sort(function (a, b) {
           var i = statOrder.indexOf(a);
           var j = statOrder.indexOf(b);
@@ -653,12 +703,25 @@
     }
 
     document.getElementById('btnRefresh').addEventListener('click', loadProjections);
-    document.getElementById('statType').addEventListener('change', function () { currentPage = 1; loadProjections(); });
     document.getElementById('streakGames').addEventListener('change', function () { currentPage = 1; loadProjections(); });
-    document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; loadProjections(); });
+    document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; renderTableFromCurrent(); });
     document.querySelectorAll('input[name="sport"]').forEach(function (cb) {
       cb.addEventListener('change', function () { currentPage = 1; loadProjections(); });
     });
+
+    (function initMainStatList() {
+      var listEl = document.getElementById('mainStatList');
+      listEl.innerHTML = '<div class="stat-row selected" data-stat=""><span class="stat-name">All</span></div>';
+      listEl.addEventListener('click', function (e) {
+        var row = e.target && e.target.closest && e.target.closest('.stat-row');
+        if (!row) return;
+        listEl.querySelectorAll('.stat-row').forEach(function (r) { r.classList.remove('selected'); });
+        row.classList.add('selected');
+        currentPage = 1;
+        renderTableFromCurrent();
+      });
+    })();
+
     document.getElementById('btnUpdateProjections').addEventListener('click', updateProjections);
     document.getElementById('btnUpdateUnderdog').addEventListener('click', updateUnderdog);
     document.getElementById('btnUpdateParlayPlay').addEventListener('click', updateParlayPlay);
