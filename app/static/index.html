@@ -222,12 +222,10 @@
 
     function getParams() {
       const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
-      const leagueIds = getSelectedLeagueIds();
       const params = new URLSearchParams();
       params.set('full_list', 'true');
       params.set('page_size', '0');
       params.set('streak_games', String(streak));
-      if (leagueIds.length) params.set('league_ids', leagueIds.join(','));
       return params;
     }
 
@@ -240,8 +238,12 @@
       var listEl = document.getElementById('mainStatList');
       if (!listEl) return;
       var prevStat = getSelectedStat();
+      var selectedLeagueIds = getSelectedLeagueIds();
+      var list = (Array.isArray(currentProjections) ? currentProjections : []).filter(function (r) {
+        var lid = r.league_id != null ? String(r.league_id) : '';
+        return selectedLeagueIds.indexOf(lid) >= 0;
+      });
       var seen = {};
-      var list = Array.isArray(currentProjections) ? currentProjections : [];
       list.forEach(function (r) {
         var s = (r.stat_type_name || '').trim();
         if (s) seen[s] = true;
@@ -400,16 +402,19 @@
       modal.classList.add('open');
 
       const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
-      const leagueIds = getSelectedLeagueIds();
       const params = new URLSearchParams();
       params.set('player_name', playerName);
       params.set('include_all_odds', 'true');
       params.set('streak_games', String(streak));
-      if (leagueIds.length) params.set('league_ids', leagueIds.join(','));
       try {
         const res = await fetch(API + '/api/projections?' + params.toString());
         if (!res.ok) throw new Error(await res.text());
-        const list = await res.json();
+        var list = await res.json();
+        var selectedLeagueIds = getSelectedLeagueIds();
+        list = list.filter(function (r) {
+          var lid = r.league_id != null ? String(r.league_id) : '';
+          return selectedLeagueIds.indexOf(lid) >= 0;
+        });
         status.style.display = 'none';
         document.getElementById('modalStatsListWrap').style.display = 'block';
         document.getElementById('modalChartWrap').style.display = 'block';
@@ -706,7 +711,7 @@
     document.getElementById('streakGames').addEventListener('change', function () { currentPage = 1; loadProjections(); });
     document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; renderTableFromCurrent(); });
     document.querySelectorAll('input[name="sport"]').forEach(function (cb) {
-      cb.addEventListener('change', function () { currentPage = 1; loadProjections(); });
+      cb.addEventListener('change', function () { currentPage = 1; updateMainStatList(); renderTableFromCurrent(); });
     });
 
     (function initMainStatList() {

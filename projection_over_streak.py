@@ -117,25 +117,41 @@ def get_projections_standard(conn, league_id: int | list[int] = 7) -> list[dict]
 
 def get_projections(
     conn,
-    league_id: int | list[int] = 7,
-    odds_type: str | None = "standard",
+    league_id: int | list[int] | None = None,
+    odds_type: str | None = None,
     active_only: bool = False,
 ) -> list[dict]:
     """Return single-player projections with PrizePicks display_name.
-    If odds_type is None, return all odds types (standard, demon, goblin, etc.).
+    If league_id is None, return all leagues. If odds_type is None, return all odds types.
     league_id can be a single int or a list of ints (multiple sports).
     If active_only is True, only return projections where start_time >= current time (not yet started).
     """
-    league_ids = [league_id] if isinstance(league_id, int) else league_id
-    if not league_ids:
+    league_ids = None if league_id is None else ([league_id] if isinstance(league_id, int) else league_id)
+    if league_ids is not None and not league_ids:
         return []
-    placeholders = ",".join("?" * len(league_ids))
-    active_clause = " AND p.start_time >= GETUTCDATE()" if active_only else ""
+    # start_time is stored in Central; use Central for date window and "not passed" check
+    now_central = "CAST(GETUTCDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2(0))"
+    where_parts = [
+        "p.player_id IS NOT NULL",
+        "(p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')",
+        f"p.start_time >= DATEADD(day, -30, CAST({now_central} AS DATE))",
+    ]
+    params = []
+    if active_only:
+        where_parts.append(f"p.start_time >= {now_central}")
     if odds_type is not None:
-        sql = f"""
+        where_parts.append("p.odds_type = ?")
+        params.append(odds_type)
+    if league_ids:
+        placeholders = ",".join("?" * len(league_ids))
+        where_parts.append(f"p.league_id IN ({placeholders})")
+        params.extend(league_ids)
+    where_sql = " AND ".join(where_parts)
+    sql = f"""
         SELECT
             p.projection_id,
             p.player_id AS pp_player_id,
+            p.league_id,
             p.line_score,
             p.stat_type_name,
             p.odds_type,
@@ -152,46 +168,11 @@ def get_projections(
         FROM [dbo].[prizepicks_projection] p
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
-        WHERE p.odds_type = ?
-          AND p.player_id IS NOT NULL
-          AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
-          AND p.league_id IN ({placeholders})
-          AND p.start_time >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
-          {active_clause}
-        ORDER BY p.stat_type_name, pp.display_name, p.line_score
-        """
-        cursor = conn.cursor()
-        cursor.execute(sql, (odds_type, *league_ids))
-    else:
-        sql = f"""
-        SELECT
-            p.projection_id,
-            p.player_id AS pp_player_id,
-            p.line_score,
-            p.stat_type_name,
-            p.odds_type,
-            p.description,
-            CONVERT(NVARCHAR(50), p.start_time, 127) AS start_time,
-            pp.display_name,
-            pp.name AS pp_name,
-            pp.team,
-            pp.team_name,
-            pp.position,
-            pp.jersey_number,
-            pp.league,
-            pp.image_url
-        FROM [dbo].[prizepicks_projection] p
-        INNER JOIN [dbo].[prizepicks_player] pp
-            ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
-        WHERE p.player_id IS NOT NULL
-          AND (p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')
-          AND p.league_id IN ({placeholders})
-          AND p.start_time >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
-          {active_clause}
+        WHERE {where_sql}
         ORDER BY pp.display_name, p.stat_type_name, p.odds_type, p.line_score
-        """
-        cursor = conn.cursor()
-        cursor.execute(sql, tuple(league_ids))
+    """
+    cursor = conn.cursor()
+    cursor.execute(sql, params)
     columns = [c[0] for c in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 

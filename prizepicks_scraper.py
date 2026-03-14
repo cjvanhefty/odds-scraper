@@ -11,6 +11,7 @@ import os
 import time
 from pathlib import Path
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Common league IDs (from Prize Picks)
 LEAGUES = {
@@ -343,17 +344,18 @@ def parse_to_projection_stage_records(response: dict) -> list[dict]:
                 return None
 
         def _dto(v):
-            """Parse ISO datetime (with or without offset) to naive datetime for storage as YYYY-MM-DD HH:MM:SS."""
+            """Parse ISO datetime (with or without offset), convert to Central time, store as naive datetime."""
             if v is None or v == "":
                 return None
             s = (v if isinstance(v, str) else str(v)).strip()
             if not s:
                 return None
             try:
-                # Python 3.11+ fromisoformat handles "2026-03-07T18:10:00.000-05:00"
+                # e.g. "2026-03-07T18:10:00.000-05:00" (API often sends Eastern)
                 dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
                 if dt.tzinfo is not None:
-                    dt = dt.replace(tzinfo=None)  # keep wall-clock time, drop offset
+                    # Convert to Central (America/Chicago), then store as naive
+                    dt = dt.astimezone(ZoneInfo("America/Chicago")).replace(tzinfo=None)
                 return dt
             except (ValueError, TypeError):
                 return None
@@ -662,7 +664,9 @@ def upsert_projection_from_stage(
     """
 
     # 2. Move to history any projection whose start_time has passed (then delete from projection)
-    move_passed_sql = """
+    # start_time is stored in Central; compare to current Central time
+    now_central_sql = "CAST(GETUTCDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2(0))"
+    move_passed_sql = f"""
         INSERT INTO [dbo].[prizepicks_projection_history] (
             projection_id, projection_type, adjusted_odds, board_time, custom_image,
             description, end_time, event_type, flash_sale_line_score, game_id,
@@ -683,12 +687,12 @@ def upsert_projection_from_stage(
             p.player_id, p.projection_type_id, p.score_id, p.stat_type_id,
             p.created_at, p.last_modified_at
         FROM [dbo].[prizepicks_projection] p
-        WHERE p.start_time < SYSDATETIMEOFFSET()
+        WHERE p.start_time < {now_central_sql}
           AND NOT EXISTS (SELECT 1 FROM [dbo].[prizepicks_projection_history] h WHERE h.projection_id = p.projection_id);
     """
-    delete_passed_sql = """
+    delete_passed_sql = f"""
         DELETE FROM [dbo].[prizepicks_projection]
-        WHERE start_time < SYSDATETIMEOFFSET();
+        WHERE start_time < {now_central_sql};
     """
 
     # 3. MERGE stage into projection
