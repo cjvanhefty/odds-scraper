@@ -109,7 +109,9 @@ def _get_projections_count(league_id: int, league_ids: str | None):
     conn = None
     try:
         conn = get_conn()
-        projections = get_projections(conn, league_id=league_id_list, odds_type="standard")
+        projections = get_projections(
+            conn, league_id=league_id_list, odds_type="standard", active_only=True
+        )
         return {"count": len(projections), "league_ids": league_id_list}
     finally:
         if conn:
@@ -139,6 +141,7 @@ def list_projections(
     player_name: str | None = Query(None, description="Filter to one player (e.g. for modal)"),
     page: int = Query(1, ge=1, description="Page number (used when page_size > 0)"),
     page_size: int = Query(0, ge=0, le=500, description="Rows per page; 0 = return all (no paging)"),
+    full_list: bool = Query(False, description="If True and not filtering by player, return all projections (no dedupe) for client-side filtering"),
 ):
     """Return PrizePicks projections with favored/risk from last N games. When page_size > 0, returns { items, total, page, page_size }."""
     conn = None
@@ -151,22 +154,43 @@ def list_projections(
         else:
             league_id_list = [league_id]
         conn = get_conn()
+        # Grid: only players with at least one active (upcoming) projection. Modal: all projections for that player.
+        active_only = not (player_name and player_name.strip())
         projections = get_projections(
             conn,
             league_id=league_id_list,
             odds_type=None if include_all_odds else "standard",
+            active_only=active_only,
         )
         if stat_type and stat_type.strip():
             projections = [p for p in projections if (p.get("stat_type_name") or "").strip() == stat_type.strip()]
         if player_name and player_name.strip():
             pn = player_name.strip()
             projections = [p for p in projections if (p.get("display_name") or p.get("pp_name") or "").strip() == pn]
-        name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=True)
-        enriched = enrich_projections_with_streak(conn, projections, name_to_nba_id, streak_games)
+        # Run streak enrichment only when opening modal (single player); grid loads fast with empty streak fields
+        if player_name and player_name.strip():
+            name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=True)
+            projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, streak_games)
+        else:
+            projections = [
+                {
+                    **dict(p),
+                    "favored": False,
+                    "risk": None,
+                    "cushion": None,
+                    "last_n_values": [],
+                    "last_n_dates": [],
+                    "last_n_opponents": [],
+                    "last_n_projection_lines": [],
+                    "streak_games": streak_games,
+                }
+                for p in projections
+            ]
         underdog_map = get_underdog_lines_by_match(conn)
         parlay_play_map = get_parlay_play_lines_by_match(conn)
         out = []
-        for r in enriched:
+        for r in projections:
+            r = dict(r)
             row = {}
             for k, v in r.items():
                 if hasattr(v, "__float__") and not isinstance(v, (bool, int)):
@@ -181,8 +205,8 @@ def list_projections(
             row["line_underdog"] = underdog_map.get(key)
             row["line_parlay_play"] = parlay_play_map.get(key)
             out.append(row)
-        # One row per player (earliest game): when not loading modal, dedupe by display_name so each player appears once.
-        # Sort by start_time, then display_name, then stat_type_name/projection_id so the same row is chosen regardless of streak_games.
+        # One row per player (earliest game): when not loading modal and not full_list, dedupe by display_name.
+        # full_list: return all rows for client-side stat filter; otherwise one row per player.
         if not (player_name and player_name.strip()):
             out.sort(
                 key=lambda r: (
@@ -192,15 +216,16 @@ def list_projections(
                     str(r.get("projection_id") or ""),
                 )
             )
-            seen_players: set[str] = set()
-            deduped: list[dict] = []
-            for row in out:
-                name = (row.get("display_name") or row.get("pp_name") or "").strip()
-                if name in seen_players:
-                    continue
-                seen_players.add(name)
-                deduped.append(row)
-            out = deduped
+            if not full_list:
+                seen_players: set[str] = set()
+                deduped: list[dict] = []
+                for row in out:
+                    name = (row.get("display_name") or row.get("pp_name") or "").strip()
+                    if name in seen_players:
+                        continue
+                    seen_players.add(name)
+                    deduped.append(row)
+                out = deduped
         if page_size > 0:
             total = len(out)
             start = (page - 1) * page_size
