@@ -97,15 +97,19 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-def _get_projections_count(league_id: int, league_ids: str | None):
-    """Shared logic for projection count."""
+def _parse_league_ids(league_id: int, league_ids: str | None) -> list[int]:
+    """Parse league_id / league_ids into a list for get_projections."""
     if league_ids and league_ids.strip():
         try:
-            league_id_list = [int(x.strip()) for x in league_ids.split(",") if x.strip()]
+            return [int(x.strip()) for x in league_ids.split(",") if x.strip()]
         except ValueError:
-            league_id_list = [7]
-    else:
-        league_id_list = [league_id]
+            return [7]
+    return [league_id]
+
+
+def _get_projections_count(league_id: int, league_ids: str | None):
+    """Shared logic for projection count. Respects league_id and league_ids."""
+    league_id_list = _parse_league_ids(league_id, league_ids)
     conn = None
     try:
         conn = get_conn()
@@ -143,18 +147,14 @@ def list_projections(
     page_size: int = Query(0, ge=0, le=500, description="Rows per page; 0 = return all (no paging)"),
     full_list: bool = Query(False, description="If True and not filtering by player, return all projections (no dedupe) for client-side filtering"),
 ):
-    """Return PrizePicks projections with favored/risk from last N games. When page_size > 0, returns { items, total, page, page_size }."""
+    """Return PrizePicks projections with favored/risk from last N games. When page_size > 0, returns { items, total, page, page_size }.
+    When league_ids is omitted or empty, returns all leagues (for grid client-side sport filter). When set, filters by those leagues."""
     conn = None
     try:
+        league_id_list = None
         if league_ids and league_ids.strip():
-            try:
-                league_id_list = [int(x.strip()) for x in league_ids.split(",") if x.strip()]
-            except ValueError:
-                league_id_list = [7]
-        else:
-            league_id_list = [league_id]
+            league_id_list = _parse_league_ids(league_id, league_ids)
         conn = get_conn()
-        # Grid: only players with at least one active (upcoming) projection. Modal: all projections for that player.
         active_only = not (player_name and player_name.strip())
         projections = get_projections(
             conn,
