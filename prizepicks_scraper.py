@@ -380,7 +380,7 @@ def parse_to_projection_stage_records(response: dict) -> list[dict]:
             "line_score": _dec(attrs.get("line_score")),
             "odds_type": (attrs.get("odds_type") or "")[:50] or None,
             "projection_display_type": (attrs.get("projection_type") or "")[:100] or None,
-            "rank": int(attrs["rank"]) if attrs.get("rank") is not None else None,
+            "rank": int(attrs.get("rank")) if attrs.get("rank") is not None else None,
             "refundable": bool(attrs.get("refundable")) if attrs.get("refundable") is not None else None,
             "start_time": _dto(attrs.get("start_time")),
             "stat_display_name": (attrs.get("stat_display_name") or "")[:100] or None,
@@ -489,6 +489,218 @@ def parse_to_stage_records(response: dict, league_id: int | None) -> list[dict]:
         })
 
     return records
+
+
+# Columns for prizepicks_game_stage / prizepicks_game (game_id PK on stage; prizepicks_game_id IDENTITY on main)
+PRIZEPICKS_GAME_STAGE_COLS = [
+    "game_id", "external_game_id", "created_at", "end_time", "start_time", "updated_at",
+    "is_live", "status", "away_team_id", "home_team_id", "league_name", "metadata_status",
+    "away_abbreviation", "home_abbreviation", "abbreviation", "market", "name",
+    "primary_color", "secondary_color", "tertiary_color", "lfg_ignored_leagues", "rank", "combo",
+    "display_name", "image_url", "jersey_number", "league", "league_id", "position", "team", "team_name",
+    "active", "f2p_enabled", "has_live_projections", "icon", "last_five_games_enabled",
+    "league_icon_id", "parent_id", "parent_name", "projections_count", "show_trending",
+]
+
+
+def _game_attr_str(val, max_len: int = 50) -> str | None:
+    if val is None:
+        return None
+    s = (str(val) or "").strip()
+    return s[:max_len] if s else None
+
+
+# API may use "game", "games", "Game", etc. for game entities in included
+GAME_INCLUDED_TYPES = frozenset({"game", "games", "Game", "Games"})
+
+
+def parse_to_game_stage_records(response: dict) -> list[dict]:
+    """Parse API response included array for type 'game' (or variants) into records for prizepicks_game_stage.
+    Only game-level attributes are mapped; player/team-only columns are left None."""
+    included = response.get("included") or []
+    by_type_id = {}
+    for item in included:
+        if isinstance(item, dict):
+            tid = f"{item.get('type', '')}_{item.get('id', '')}"
+            by_type_id[tid] = item
+
+    records = []
+    for item in included:
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type") or ""
+        attrs = item.get("attributes") or {}
+        # Accept known game types, or any type with game-like attributes (start_time + team ids or description)
+        is_game_type = itype in GAME_INCLUDED_TYPES
+        has_start = attrs.get("start_time") is not None
+        rels_check = item.get("relationships") or {}
+        has_teams = (
+            attrs.get("away_team_id") is not None
+            or attrs.get("home_team_id") is not None
+            or rels_check.get("away_team")
+            or rels_check.get("home_team")
+            or rels_check.get("away_team_data")
+            or rels_check.get("home_team_data")
+        )
+        is_game_like = has_start and (has_teams or attrs.get("description"))
+        if not is_game_type and not is_game_like:
+            continue
+        gid = item.get("id")
+        if gid is None:
+            continue
+        game_id = str(gid).strip()[:20]
+        if not game_id:
+            continue
+        attrs = item.get("attributes") or {}
+        rels = item.get("relationships") or {}
+
+        def _dt_str(v):
+            if v is None or v == "":
+                return None
+            return (str(v) or "").strip()[:50] or None
+
+        # API uses away_team_data / home_team_data (not away_team / home_team)
+        away_rel = rels.get("away_team_data") or rels.get("away_team") or {}
+        home_rel = rels.get("home_team_data") or rels.get("home_team") or {}
+        away_data = away_rel.get("data") if isinstance(away_rel, dict) else None
+        home_data = home_rel.get("data") if isinstance(home_rel, dict) else None
+        if isinstance(away_data, list) and away_data:
+            away_data = away_data[0]
+        if isinstance(home_data, list) and home_data:
+            home_data = home_data[0]
+        # Raw IDs (full length) for by_type_id lookup; truncated for DB column
+        away_team_id_raw = attrs.get("away_team_id") or (away_data.get("id") if isinstance(away_data, dict) else None)
+        home_team_id_raw = attrs.get("home_team_id") or (home_data.get("id") if isinstance(home_data, dict) else None)
+        away_team_id_raw = (str(away_team_id_raw).strip() or None) if away_team_id_raw is not None else None
+        home_team_id_raw = (str(home_team_id_raw).strip() or None) if home_team_id_raw is not None else None
+        away_team_id = _game_attr_str(away_team_id_raw, 20)
+        home_team_id = _game_attr_str(home_team_id_raw, 20)
+        away_type = away_data.get("type", "team") if isinstance(away_data, dict) else "team"
+        home_type = home_data.get("type", "team") if isinstance(home_data, dict) else "team"
+
+        away_abbrev = _game_attr_str(attrs.get("away_abbreviation"), 10)
+        home_abbrev = _game_attr_str(attrs.get("home_abbreviation"), 10)
+        if away_abbrev is None and away_team_id_raw:
+            away_ent = by_type_id.get(f"team_{away_team_id_raw}") or by_type_id.get(f"team_data_{away_team_id_raw}") or by_type_id.get(f"{away_type}_{away_team_id_raw}")
+            if away_ent:
+                away_abbrev = _game_attr_str((away_ent.get("attributes") or {}).get("abbreviation"), 10)
+        if home_abbrev is None and home_team_id_raw:
+            home_ent = by_type_id.get(f"team_{home_team_id_raw}") or by_type_id.get(f"team_data_{home_team_id_raw}") or by_type_id.get(f"{home_type}_{home_team_id_raw}")
+            if home_ent:
+                home_abbrev = _game_attr_str((home_ent.get("attributes") or {}).get("abbreviation"), 10)
+
+        def _b(v):
+            if v is None:
+                return None
+            return bool(v)
+
+        records.append({
+            "game_id": game_id,
+            "external_game_id": _game_attr_str(attrs.get("external_game_id"), 100),
+            "created_at": _dt_str(attrs.get("created_at")),
+            "end_time": _dt_str(attrs.get("end_time")),
+            "start_time": _dt_str(attrs.get("start_time")),
+            "updated_at": _dt_str(attrs.get("updated_at")),
+            "is_live": _b(attrs.get("is_live")),
+            "status": _game_attr_str(attrs.get("status"), 50),
+            "away_team_id": away_team_id,
+            "home_team_id": home_team_id,
+            "league_name": _game_attr_str(attrs.get("league_name"), 50),
+            "metadata_status": _game_attr_str(attrs.get("metadata_status"), 50),
+            "away_abbreviation": away_abbrev,
+            "home_abbreviation": home_abbrev,
+            "abbreviation": None,
+            "market": _game_attr_str(attrs.get("market"), 100),
+            "name": _game_attr_str(attrs.get("name"), 100),
+            "primary_color": _game_attr_str(attrs.get("primary_color"), 10),
+            "secondary_color": _game_attr_str(attrs.get("secondary_color"), 10),
+            "tertiary_color": _game_attr_str(attrs.get("tertiary_color"), 10),
+            "lfg_ignored_leagues": _game_attr_str(attrs.get("lfg_ignored_leagues"), 500),
+            "rank": int(attrs.get("rank")) if attrs.get("rank") is not None else None,
+            "combo": _b(attrs.get("combo")),
+            "display_name": None,
+            "image_url": None,
+            "jersey_number": None,
+            "league": _game_attr_str(attrs.get("league"), 50),
+            "league_id": _game_attr_str(attrs.get("league_id"), 20),
+            "position": None,
+            "team": None,
+            "team_name": None,
+            "active": _b(attrs.get("active")),
+            "f2p_enabled": _b(attrs.get("f2p_enabled")),
+            "has_live_projections": _b(attrs.get("has_live_projections")),
+            "icon": _game_attr_str(attrs.get("icon"), 50),
+            "last_five_games_enabled": _b(attrs.get("last_five_games_enabled")),
+            "league_icon_id": int(attrs.get("league_icon_id")) if attrs.get("league_icon_id") is not None else None,
+            "parent_id": _game_attr_str(attrs.get("parent_id"), 20),
+            "parent_name": _game_attr_str(attrs.get("parent_name"), 100),
+            "projections_count": int(attrs.get("projections_count")) if attrs.get("projections_count") is not None else None,
+            "show_trending": _b(attrs.get("show_trending")),
+        })
+
+    return records
+
+
+def insert_game_stage(
+    records: list[dict],
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """Truncate prizepicks_game_stage and insert game records. Returns count. Table must exist."""
+    import pyodbc
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    cols = [c for c in PRIZEPICKS_GAME_STAGE_COLS]
+    placeholders = ", ".join("?" * len(cols))
+    sql_truncate = "TRUNCATE TABLE [dbo].[prizepicks_game_stage]"
+    sql_insert = f"INSERT INTO [dbo].[prizepicks_game_stage] ({', '.join(cols)}) VALUES ({placeholders})"
+    count = 0
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(sql_truncate)
+        for r in records:
+            cursor.execute(sql_insert, [r.get(c) for c in cols])
+            count += cursor.rowcount
+    conn.close()
+    return count
+
+
+def upsert_game_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """MERGE prizepicks_game_stage into prizepicks_game on game_id. Returns rows affected."""
+    import pyodbc
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    cols = [c for c in PRIZEPICKS_GAME_STAGE_COLS]
+    cols_comma = ", ".join(cols)
+    set_clauses = ", ".join(f"t.[{c}] = s.[{c}]" for c in cols if c != "game_id")
+    merge_sql = f"""
+        MERGE [dbo].[prizepicks_game] AS t
+        USING [dbo].[prizepicks_game_stage] AS s
+        ON t.game_id = s.game_id
+        WHEN MATCHED THEN
+            UPDATE SET {set_clauses}
+        WHEN NOT MATCHED BY TARGET THEN
+            INSERT ({cols_comma}) VALUES ({", ".join("s.[" + c + "]" for c in cols)});
+    """
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(merge_sql)
+        count = cursor.rowcount
+    conn.close()
+    return count
 
 
 def _get_db_conn(
@@ -945,6 +1157,11 @@ def main():
         help="Print API URLs seen (for troubleshooting 403/capture issues)",
     )
     parser.add_argument(
+        "--save-response",
+        metavar="FILE",
+        help="Save raw API response (data + included) to a JSON file (e.g. response.json)",
+    )
+    parser.add_argument(
         "--db",
         action="store_true",
         help="Upsert projections and players to DB (projection→stage→projection with history; player→stage→player no history)",
@@ -1034,6 +1251,13 @@ def main():
             return 1
         print(f"Found {len(projections)} projections")
 
+    if getattr(args, "save_response", None):
+        path = Path(args.save_response)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(resp, f, indent=2, default=str)
+        print(f"Saved raw API response to {path}")
+
     if args.db:
         if args.all_leagues:
             records = all_projection_records
@@ -1081,6 +1305,29 @@ def main():
                     trusted_connection=trusted,
                 )
                 print(f"Upserted {p_merge} rows to prizepicks_player")
+            game_records = parse_to_game_stage_records(resp)
+            if not game_records:
+                included = resp.get("included") or []
+                types_seen = sorted({(i.get("type") or "(none)") for i in included if isinstance(i, dict)})
+                print(f"No game entities parsed from API. Included types in response: {types_seen}")
+            if game_records:
+                gn = insert_game_stage(
+                    game_records,
+                    server=args.db_server,
+                    database="Props",
+                    user=args.db_user,
+                    password=args.db_password,
+                    trusted_connection=trusted,
+                )
+                print(f"Loaded {gn} rows into prizepicks_game_stage")
+                g_merge = upsert_game_from_stage(
+                    server=args.db_server,
+                    database="Props",
+                    user=args.db_user,
+                    password=args.db_password,
+                    trusted_connection=trusted,
+                )
+                print(f"Upserted {g_merge} rows to prizepicks_game")
         except Exception as e:
             print(f"DB failed: {e}")
             import traceback
