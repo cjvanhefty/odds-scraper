@@ -3,15 +3,28 @@ FastAPI app for projections UI.
 Run from repo root: uvicorn app.main:app --reload
 """
 
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Query, HTTPException, Body
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+# When True, resolve_nba_player_ids will call nba_api if [player] table is empty/missing.
+# Set PROPS_USE_NBA_API_FALLBACK=1 to enable when DB mapping is not yet populated (slower, external dependency).
+USE_NBA_API_FALLBACK = os.environ.get("PROPS_USE_NBA_API_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+
+PLAYER_MAPPING_WARNING = (
+    "Player mapping unavailable; streak data may be empty. "
+    "Ensure prizepicks_player.nba_player_id or [player] table is populated. "
+    "Or set PROPS_USE_NBA_API_FALLBACK=1 to use nba_api as fallback."
+)
 
 # Repo root on path for imports
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +38,26 @@ from projection_over_streak import (
 )
 
 from app.db import get_conn
+
+
+def _json_safe(val):
+    """Coerce value to JSON-serializable type (e.g. Decimal -> float, for API responses)."""
+    if val is None:
+        return None
+    if isinstance(val, (bool, str)):
+        return val
+    if isinstance(val, int) and not isinstance(val, bool):
+        return int(val)
+    if hasattr(val, "__float__") and not isinstance(val, bool):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(val, (list, tuple)):
+        return [_json_safe(x) for x in val]
+    if isinstance(val, dict):
+        return {k: _json_safe(v) for k, v in val.items()}
+    return val
 
 
 def get_underdog_lines_by_match(conn) -> dict:
@@ -135,6 +168,53 @@ def get_projections_count(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/projections/streak")
+def get_projections_streak(
+    player_name: str = Query(..., description="Player display name (e.g. for modal lazy-load)"),
+    streak_games: int = Query(5, ge=1, le=20, description="Number of games for last-N stats"),
+):
+    """Return streak enrichment only for one player. Frontend merges by projection_id for lazy-load modal."""
+    conn = None
+    try:
+        conn = get_conn()
+        projections = get_projections(
+            conn,
+            league_id=None,
+            odds_type=None,
+            active_only=False,
+        )
+        pn = (player_name or "").strip()
+        if not pn:
+            return []
+        projections = [p for p in projections if (p.get("display_name") or p.get("pp_name") or "").strip() == pn]
+        if not projections:
+            return []
+        name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=USE_NBA_API_FALLBACK)
+        projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, streak_games)
+        out = []
+        for r in projections:
+            out.append({
+                "projection_id": _json_safe(r.get("projection_id")),
+                "display_name": (r.get("display_name") or r.get("pp_name") or "").strip(),
+                "stat_type_name": (r.get("stat_type_name") or "").strip(),
+                "favored": r.get("favored"),
+                "risk": r.get("risk"),
+                "cushion": _json_safe(r.get("cushion")),
+                "last_n_values": _json_safe(r.get("last_n_values") or []),
+                "last_n_dates": r.get("last_n_dates") or [],
+                "last_n_opponents": r.get("last_n_opponents") or [],
+                "last_n_projection_lines": _json_safe(r.get("last_n_projection_lines") or []),
+                "streak_games": _json_safe(r.get("streak_games") or streak_games),
+            })
+        return out
+    except Exception as e:
+        logger.exception("get_projections_streak failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/api/projections")
 def list_projections(
     stat_type: str | None = Query(None, description="Filter by stat type (e.g. Points, Rebounds)"),
@@ -143,6 +223,7 @@ def list_projections(
     league_ids: str | None = Query(None, description="Comma-separated PrizePicks league_ids (e.g. 7,9,82 for NBA, NFL, Soccer)"),
     include_all_odds: bool = Query(False, description="Include all odds types (standard, demon, goblin) for modals"),
     player_name: str | None = Query(None, description="Filter to one player (e.g. for modal)"),
+    skip_streak: bool = Query(False, description="If True, omit streak enrichment (faster; use with player_name for lazy-load modal)"),
     page: int = Query(1, ge=1, description="Page number (used when page_size > 0)"),
     page_size: int = Query(0, ge=0, le=500, description="Rows per page; 0 = return all (no paging)"),
     full_list: bool = Query(False, description="If True and not filtering by player, return all projections (no dedupe) for client-side filtering"),
@@ -167,10 +248,32 @@ def list_projections(
         if player_name and player_name.strip():
             pn = player_name.strip()
             projections = [p for p in projections if (p.get("display_name") or p.get("pp_name") or "").strip() == pn]
-        # Run streak enrichment only when opening modal (single player); grid loads fast with empty streak fields
-        if player_name and player_name.strip():
-            name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=True)
+        # Run streak enrichment only when opening modal (single player) and not skip_streak; grid loads fast with empty streak fields
+        streak_mapping_unavailable = False
+        if player_name and player_name.strip() and not skip_streak:
+            name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=USE_NBA_API_FALLBACK)
+            if not name_to_nba_id and projections:
+                logger.warning(
+                    "Modal requested but NBA player mapping is empty; streak data may be missing. %s",
+                    PLAYER_MAPPING_WARNING,
+                )
+                streak_mapping_unavailable = True
             projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, streak_games)
+        elif player_name and player_name.strip() and skip_streak:
+            projections = [
+                {
+                    **dict(p),
+                    "favored": False,
+                    "risk": None,
+                    "cushion": None,
+                    "last_n_values": [],
+                    "last_n_dates": [],
+                    "last_n_opponents": [],
+                    "last_n_projection_lines": [],
+                    "streak_games": streak_games,
+                }
+                for p in projections
+            ]
         else:
             projections = [
                 {
@@ -250,8 +353,11 @@ def list_projections(
             start = (page - 1) * page_size
             end = start + page_size
             items = out[start:end]
-            return {"items": items, "total": total, "page": page, "page_size": page_size}
-        return out
+            body = {"items": items, "total": total, "page": page, "page_size": page_size}
+            headers = {"X-Projections-Warning": PLAYER_MAPPING_WARNING} if streak_mapping_unavailable else {}
+            return JSONResponse(content=body, headers=headers)
+        headers = {"X-Projections-Warning": PLAYER_MAPPING_WARNING} if streak_mapping_unavailable else {}
+        return JSONResponse(content=out, headers=headers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -263,38 +369,53 @@ def list_projections(
 def get_last_five_batch(
     streak_games: int = Query(5, ge=1, le=20, description="Number of games for last-N stats"),
 ):
-    """Return last N game stats for every NBA player (league_id=7) that has a projection. Client merges by (display_name, stat_type_name)."""
+    """Return last N game stats for every NBA (player, stat) that has a projection. Ignores odds_type so all stats (standard, demon, goblin) are included. Client merges by (display_name, stat_type_name)."""
     conn = None
     try:
         conn = get_conn()
         projections = get_projections(
             conn,
             league_id=7,
-            odds_type="standard",
+            odds_type=None,
             active_only=True,
         )
         if not projections:
             return []
-        name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=True)
+        name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=USE_NBA_API_FALLBACK)
+        if not name_to_nba_id:
+            logger.warning(
+                "Last-five batch: NBA player mapping is empty; all streak data may be missing. %s",
+                PLAYER_MAPPING_WARNING,
+            )
         enriched = enrich_projections_with_streak(
             conn, projections, name_to_nba_id, streak_games
         )
         out = []
+        seen_key: set[tuple[str, str]] = set()
         for r in enriched:
+            key = (
+                (r.get("display_name") or r.get("pp_name") or "").strip(),
+                (r.get("stat_type_name") or "").strip(),
+            )
+            if key in seen_key:
+                continue
+            seen_key.add(key)
             out.append({
                 "display_name": (r.get("display_name") or r.get("pp_name") or "").strip(),
                 "stat_type_name": (r.get("stat_type_name") or "").strip(),
                 "favored": r.get("favored"),
                 "risk": r.get("risk"),
-                "cushion": r.get("cushion"),
-                "last_n_values": r.get("last_n_values") or [],
+                "cushion": _json_safe(r.get("cushion")),
+                "last_n_values": _json_safe(r.get("last_n_values") or []),
                 "last_n_dates": r.get("last_n_dates") or [],
                 "last_n_opponents": r.get("last_n_opponents") or [],
-                "last_n_projection_lines": r.get("last_n_projection_lines") or [],
-                "streak_games": r.get("streak_games") or 5,
+                "last_n_projection_lines": _json_safe(r.get("last_n_projection_lines") or []),
+                "streak_games": _json_safe(r.get("streak_games") or 5),
             })
-        return out
+        headers = {"X-Projections-Warning": PLAYER_MAPPING_WARNING} if not name_to_nba_id else {}
+        return JSONResponse(content=out, headers=headers)
     except Exception as e:
+        logger.exception("get_last_five_batch failed")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if conn:
