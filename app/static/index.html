@@ -147,6 +147,8 @@
           <tr>
             <th>Player</th>
             <th>Start time</th>
+            <th>Opponent</th>
+            <th>H/A</th>
             <th>Stat</th>
             <th>PrizePicks</th>
             <th>Underdog</th>
@@ -254,6 +256,41 @@
       if (activeBtn) return [activeBtn.getAttribute('data-league-id')];
       if (selectedLeagueId != null) return [String(selectedLeagueId)];
       return [7];
+    }
+
+    function getOpponentOrVenue(r) {
+      var desc = (r.description && (r.description + '').trim()) || '';
+      var team = (r.team && (r.team + '').trim()) || '';
+      var teamName = (r.team_name && (r.team_name + '').trim()) || '';
+      if (!desc) return { text: '—', homeAway: null };
+      var descLower = desc.toLowerCase();
+      var atIdx = descLower.indexOf(' @ ');
+      var vsIdx = descLower.indexOf(' vs. ');
+      if (vsIdx < 0) vsIdx = descLower.indexOf(' vs ');
+      function matchesUs(part, us) {
+        if (!us) return false;
+        var p = (part + '').trim().toLowerCase();
+        var u = (us + '').trim().toLowerCase();
+        return p === u || p.indexOf(u) >= 0 || u.indexOf(p) >= 0;
+      }
+      if (atIdx >= 0) {
+        var awayPart = desc.slice(0, atIdx).trim();
+        var homePart = desc.slice(atIdx + 3).trim();
+        var us = team || teamName;
+        if (matchesUs(awayPart, us)) return { text: homePart, homeAway: 'A' };
+        if (matchesUs(homePart, us)) return { text: awayPart, homeAway: 'H' };
+        return { text: desc, homeAway: null };
+      }
+      if (vsIdx >= 0) {
+        var sepLen = (desc.slice(vsIdx, vsIdx + 5).toLowerCase() === ' vs. ' ? 5 : 4);
+        var first = desc.slice(0, vsIdx).trim();
+        var second = desc.slice(vsIdx + sepLen).trim();
+        var us = team || teamName;
+        if (matchesUs(first, us)) return { text: second, homeAway: 'H' };
+        if (matchesUs(second, us)) return { text: first, homeAway: 'A' };
+        return { text: desc, homeAway: null };
+      }
+      return { text: desc, homeAway: null };
     }
 
     let currentPage = 1;
@@ -385,7 +422,16 @@
         const lineUD = r.line_underdog != null ? Number(r.line_underdog) : '—';
         const linePP2 = r.line_parlay_play != null ? Number(r.line_parlay_play) : '—';
         const playerName = r.display_name || r.pp_name || '';
-        return '<tr><td><span class="player-link" data-player="' + escapeHtml(playerName) + '">' + escapeHtml(playerName) + '</span></td><td>' + startTime + '</td><td>' + escapeHtml(r.stat_type_name || '') + '</td><td>' + linePP + '</td><td>' + lineUD + '</td><td>' + linePP2 + '</td><td>' + risk + '</td><td>' + favored + '</td></tr>';
+        var oppCell, haCell;
+        if (r.opponent_abbreviation != null && r.opponent_abbreviation !== '' && r.home_away != null && r.home_away !== '') {
+          oppCell = escapeHtml(r.opponent_abbreviation);
+          haCell = r.home_away === 'H' ? 'Home' : (r.home_away === 'A' ? 'Away' : '—');
+        } else {
+          var oppVenue = getOpponentOrVenue(r);
+          oppCell = escapeHtml(oppVenue.text);
+          haCell = oppVenue.homeAway === 'H' ? 'Home' : (oppVenue.homeAway === 'A' ? 'Away' : '—');
+        }
+        return '<tr><td><span class="player-link" data-player="' + escapeHtml(playerName) + '">' + escapeHtml(playerName) + '</span></td><td>' + startTime + '</td><td>' + oppCell + '</td><td>' + haCell + '</td><td>' + escapeHtml(r.stat_type_name || '') + '</td><td>' + linePP + '</td><td>' + lineUD + '</td><td>' + linePP2 + '</td><td>' + risk + '</td><td>' + favored + '</td></tr>';
       }).join('');
       body.querySelectorAll('.player-link').forEach(function (el) {
         el.addEventListener('click', function () { openPlayerModal(el.getAttribute('data-player')); });

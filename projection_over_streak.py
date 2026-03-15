@@ -164,10 +164,14 @@ def get_projections(
             pp.position,
             pp.jersey_number,
             pp.league,
-            pp.image_url
+            pp.image_url,
+            g.away_abbreviation,
+            g.home_abbreviation
         FROM [dbo].[prizepicks_projection] p
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
+        LEFT JOIN [dbo].[prizepicks_game] g
+            ON g.game_id = CAST(p.game_id AS NVARCHAR(20))
         WHERE {where_sql}
         ORDER BY pp.display_name, p.stat_type_name, p.odds_type, p.line_score
     """

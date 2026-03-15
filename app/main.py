@@ -204,6 +204,25 @@ def list_projections(
             key = (display_name, stat_type_name, game_date)
             row["line_underdog"] = underdog_map.get(key)
             row["line_parlay_play"] = parlay_play_map.get(key)
+            # Opponent and H/A from prizepicks_game when available
+            home_abbrev = (r.get("home_abbreviation") or "").strip()
+            away_abbrev = (r.get("away_abbreviation") or "").strip()
+            player_team = (r.get("team") or r.get("team_name") or "").strip()
+            if home_abbrev and away_abbrev and player_team:
+                ph, pa = player_team.upper(), away_abbrev.upper()
+                hh, ha = home_abbrev.upper(), away_abbrev.upper()
+                if ph == hh or (hh in ph) or (ph in hh):
+                    row["opponent_abbreviation"] = away_abbrev
+                    row["home_away"] = "H"
+                elif ph == ha or (ha in ph) or (ph in ha):
+                    row["opponent_abbreviation"] = home_abbrev
+                    row["home_away"] = "A"
+                else:
+                    row["opponent_abbreviation"] = None
+                    row["home_away"] = None
+            else:
+                row["opponent_abbreviation"] = None
+                row["home_away"] = None
             out.append(row)
         # One row per player (earliest game): when not loading modal and not full_list, dedupe by display_name.
         # full_list: return all rows for client-side stat filter; otherwise one row per player.
