@@ -210,6 +210,8 @@
   <script>
     const API = '';
     let currentProjections = [];
+    /** Full last-five streak data for all NBA (player, stat) from /api/projections/last-five. Used so modal merge has streak for every stat, not only rows on current grid page. */
+    var lastFiveByKey = {};
     var selectedLeagueId = '7';
     var LEAGUE_NAMES = { 2: 'MLB', 7: 'NBA', 8: 'NHL', 9: 'Football', 14: 'EPL', 15: 'CFB', 20: 'CBB', 82: 'Soccer' };
     var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
@@ -470,12 +472,14 @@
         fetch(API + '/api/projections/last-five?streak_games=' + streakGames)
           .then(function (r) { return r.ok ? r.json() : []; })
           .then(function (lastFiveList) {
-            if (!Array.isArray(lastFiveList) || !Array.isArray(currentProjections)) return;
+            if (!Array.isArray(lastFiveList)) return;
             var byKey = {};
             lastFiveList.forEach(function (item) {
-              var key = (item.display_name || '') + '\n' + (item.stat_type_name || '');
+              var key = ((item.display_name || '').trim()) + '\n' + ((item.stat_type_name || '').trim());
               byKey[key] = item;
             });
+            lastFiveByKey = byKey;
+            if (!Array.isArray(currentProjections)) return;
             currentProjections.forEach(function (r) {
               if (r.league_id != null && String(r.league_id) !== '7') return;
               var name = (r.display_name || r.pp_name || '').trim();
@@ -502,6 +506,48 @@
       wrap.classList.remove('loading');
     }
 
+    var modalState = { playerName: null, streakGames: null, list: null, byStat: null, stats: null, streakLoading: false, abortController: null };
+
+    function mergeStreakFromGridIntoModalList(modalList) {
+      if (!Array.isArray(modalList)) return false;
+      var byKey = lastFiveByKey && Object.keys(lastFiveByKey).length > 0
+        ? lastFiveByKey
+        : (function () {
+            var fallback = {};
+            if (!Array.isArray(currentProjections)) return fallback;
+            currentProjections.forEach(function (r) {
+              if (r.league_id == null || String(r.league_id) !== '7') return;
+              var name = (r.display_name || r.pp_name || '').trim();
+              var stat = (r.stat_type_name || '').trim();
+              var key = name + '\n' + stat;
+              if (key in fallback) return;
+              if (r.last_n_values && r.last_n_values.length > 0) fallback[key] = r;
+            });
+            return fallback;
+          })();
+      var merged = false;
+      modalList.forEach(function (r) {
+        var lid = r.league_id != null ? String(r.league_id) : '';
+        if (lid !== '7') return;
+        var name = (r.display_name || r.pp_name || '').trim();
+        var stat = (r.stat_type_name || '').trim();
+        var key = name + '\n' + stat;
+        var src = byKey[key];
+        if (src) {
+          r.favored = src.favored;
+          r.risk = src.risk;
+          r.cushion = src.cushion;
+          r.last_n_values = src.last_n_values || [];
+          r.last_n_dates = src.last_n_dates || [];
+          r.last_n_opponents = src.last_n_opponents || [];
+          r.last_n_projection_lines = src.last_n_projection_lines || [];
+          r.streak_games = src.streak_games;
+          merged = true;
+        }
+      });
+      return merged;
+    }
+
     async function openPlayerModal(playerName) {
       const modal = document.getElementById('playerModal');
       const title = document.getElementById('modalPlayerName');
@@ -521,13 +567,20 @@
       status.textContent = 'Loading...';
       modal.classList.add('open');
 
-      const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
-      const params = new URLSearchParams();
+      var streakGames = parseInt(document.getElementById('streakGames').value, 10) || 5;
+      if (modalState.abortController) modalState.abortController.abort();
+      modalState.playerName = playerName;
+      modalState.streakGames = streakGames;
+      modalState.streakLoading = true;
+      modalState.abortController = new AbortController();
+      var streakSignal = modalState.abortController.signal;
+
+      var params = new URLSearchParams();
       params.set('player_name', playerName);
       params.set('include_all_odds', 'true');
-      params.set('streak_games', String(streak));
+      params.set('skip_streak', 'true');
       try {
-        const res = await fetch(API + '/api/projections?' + params.toString());
+        var res = await fetch(API + '/api/projections?' + params.toString());
         if (!res.ok) throw new Error(await res.text());
         var list = await res.json();
         var selectedLeagueIds = getSelectedLeagueIds();
@@ -535,6 +588,9 @@
           var lid = r.league_id != null ? String(r.league_id) : '';
           return selectedLeagueIds.indexOf(lid) >= 0;
         });
+        modalState.list = list;
+        var haveStreakFromGrid = mergeStreakFromGridIntoModalList(list);
+        if (haveStreakFromGrid) modalState.streakLoading = false;
         status.style.display = 'none';
         document.getElementById('modalStatsListWrap').style.display = 'block';
         document.getElementById('modalChartWrap').style.display = 'block';
@@ -576,6 +632,7 @@
           if (!byStat[stat]) byStat[stat] = [];
           byStat[stat].push(r);
         });
+        modalState.byStat = byStat;
         var stats = Object.keys(byStat).sort(function (a, b) {
           var i = statOrder.indexOf(a);
           var j = statOrder.indexOf(b);
@@ -584,6 +641,7 @@
           if (j !== -1) return 1;
           return a.localeCompare(b);
         });
+        modalState.stats = stats;
 
         statsList.innerHTML = stats.map(function (stat) {
           return '<div class="stat-row" data-stat="' + escapeHtml(stat) + '"><span class="stat-name">' + escapeHtml(stat) + '</span></div>';
@@ -593,7 +651,7 @@
           el.addEventListener('click', function () {
             statsList.querySelectorAll('.stat-row').forEach(function (r) { r.classList.remove('selected'); });
             el.classList.add('selected');
-            showStatDetail(byStat[el.getAttribute('data-stat')]);
+            showStatDetail(modalState.byStat && modalState.byStat[el.getAttribute('data-stat')]);
           });
         });
 
@@ -607,8 +665,49 @@
           document.getElementById('chartStatName').textContent = '';
           document.getElementById('modalChartWrap').style.display = 'none';
         }
+
+        if (!haveStreakFromGrid) {
+          var streakParams = new URLSearchParams();
+          streakParams.set('player_name', playerName);
+          streakParams.set('streak_games', String(streakGames));
+          fetch(API + '/api/projections/streak?' + streakParams.toString(), { signal: streakSignal })
+            .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error(r.statusText)); })
+            .then(function (streakList) {
+              if (!modal.classList.contains('open') || modalState.playerName !== playerName || modalState.streakGames !== streakGames) return;
+              var byId = {};
+              (modalState.list || []).forEach(function (r, idx) { byId[r.projection_id] = r; });
+              streakList.forEach(function (s) {
+                var row = byId[s.projection_id];
+                if (!row) return;
+                row.favored = s.favored;
+                row.risk = s.risk;
+                row.cushion = s.cushion;
+                row.last_n_values = s.last_n_values || [];
+                row.last_n_dates = s.last_n_dates || [];
+                row.last_n_opponents = s.last_n_opponents || [];
+                row.last_n_projection_lines = s.last_n_projection_lines || [];
+                row.streak_games = s.streak_games;
+              });
+              modalState.streakLoading = false;
+              var sel = document.querySelector('#modalStatsList .stat-row.selected');
+              var statsArr = modalState.stats;
+              var statName = sel ? sel.getAttribute('data-stat') : (statsArr && statsArr.length ? statsArr[0] : null);
+              if (statName && modalState.byStat && modalState.byStat[statName]) showStatDetail(modalState.byStat[statName]);
+            })
+            .catch(function (err) {
+              if (err.name === 'AbortError') return;
+              modalState.streakLoading = false;
+              var sel = document.querySelector('#modalStatsList .stat-row.selected');
+              var statsArr = modalState.stats;
+              var statName = sel ? sel.getAttribute('data-stat') : (statsArr && statsArr.length ? statsArr[0] : null);
+              if (statName && modalState.byStat && modalState.byStat[statName]) showStatDetail(modalState.byStat[statName]);
+            });
+        } else {
+          modalState.streakLoading = false;
+        }
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
+        modalState.streakLoading = false;
       }
     }
 
@@ -682,7 +781,8 @@
       });
       var first = rowsByLine[0];
       var statName = first.stat_type_name || '';
-      document.getElementById('chartStatName').textContent = statName + ' — last 5 games';
+      var n = first.streak_games != null ? first.streak_games : 5;
+      document.getElementById('chartStatName').textContent = statName + ' — last ' + n + ' games';
 
       var values = first.last_n_values || [];
       var dates = first.last_n_dates || [];
@@ -704,7 +804,10 @@
       document.getElementById('modalOddsTypes').innerHTML = oddsHtml;
 
       if (values.length === 0) {
-        document.getElementById('chartBars').innerHTML = '<div class="chart-label" style="width:100%;">No last-game data for this stat.</div>';
+        var msg = (typeof modalState !== 'undefined' && modalState.streakLoading)
+          ? 'Loading streak…'
+          : 'No last-game data for this stat.';
+        document.getElementById('chartBars').innerHTML = '<div class="chart-label" style="width:100%;">' + escapeHtml(msg) + '</div>';
         document.getElementById('chartLegend').innerHTML = '';
       } else {
         updateChartForLine(primaryLine);
@@ -722,10 +825,14 @@
     });
 
     document.getElementById('modalClose').addEventListener('click', function () {
+      if (modalState.abortController) modalState.abortController.abort();
       document.getElementById('playerModal').classList.remove('open');
     });
     document.getElementById('playerModal').addEventListener('click', function (e) {
-      if (e.target === this) this.classList.remove('open');
+      if (e.target === this) {
+        if (modalState.abortController) modalState.abortController.abort();
+        this.classList.remove('open');
+      }
     });
 
     function showUpdateMessage(text, isError) {

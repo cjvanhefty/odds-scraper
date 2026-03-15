@@ -10,9 +10,15 @@ otherwise to nba_api CommonAllPlayers DISPLAY_FIRST_LAST.
 import db_config  # noqa: F401 - load .env from repo root before DB
 import argparse
 import csv
+import logging
 import os
 import re
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
+
+# Cache for resolve_nba_player_ids: (use_api_fallback, season) -> name -> nba_id dict. Invalidated on process restart.
+_nba_id_cache: dict[tuple[bool, str], dict[str, int]] = {}
 
 # PrizePicks stat_type_name -> player_stat column name(s). Single str = one column; tuple = sum of columns.
 STAT_COLUMN_MAP = {
@@ -165,6 +171,7 @@ def get_projections(
             pp.jersey_number,
             pp.league,
             pp.image_url,
+            pp.nba_player_id,
             g.away_abbreviation,
             g.home_abbreviation
         FROM [dbo].[prizepicks_projection] p
@@ -182,14 +189,26 @@ def get_projections(
 
 
 def get_nba_player_id_by_name_from_table(conn) -> dict[str, int] | None:
-    """If [player] table exists with full_name or (first_name, last_name), return name -> player_id map."""
+    """If [player] table exists with display_first_last, full_name, or (first_name, last_name), return name -> player_id map."""
     cursor = conn.cursor()
     cursor.execute("""
         SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'player'
     """)
     if not cursor.fetchone():
         return None
-    # Try full_name first
+    # Try display_first_last (matches PrizePicks display_name format)
+    try:
+        cursor.execute("""
+            SELECT player_id, LTRIM(RTRIM(display_first_last)) AS full_name
+            FROM [dbo].[player]
+            WHERE display_first_last IS NOT NULL AND LTRIM(RTRIM(display_first_last)) <> ''
+        """)
+        rows = cursor.fetchall()
+        if rows:
+            return {_normalize_name(r[1]): int(r[0]) for r in rows}
+    except Exception:
+        pass
+    # Try full_name
     try:
         cursor.execute("SELECT player_id, full_name FROM [dbo].[player] WHERE full_name IS NOT NULL AND full_name <> ''")
         rows = cursor.fetchall()
@@ -232,7 +251,11 @@ def get_nba_player_id_by_name_from_api(season: str = "2025-26") -> dict[str, int
 def resolve_nba_player_ids(conn, use_api_fallback: bool = True, season: str = "2025-26") -> dict[str, int]:
     """Name -> NBA player_id: from [player] table if available, else from nba_api.
     Keys are normalized and lowercased for case-insensitive matching.
+    Result is cached per (use_api_fallback, season) for the process lifetime.
     """
+    cache_key = (use_api_fallback, season)
+    if cache_key in _nba_id_cache:
+        return _nba_id_cache[cache_key]
     raw: dict[str, int] = {}
     from_table = get_nba_player_id_by_name_from_table(conn)
     if from_table is not None and from_table:
@@ -240,9 +263,18 @@ def resolve_nba_player_ids(conn, use_api_fallback: bool = True, season: str = "2
     elif use_api_fallback:
         raw = get_nba_player_id_by_name_from_api(season)
     if not raw:
+        if not use_api_fallback:
+            logger.warning(
+                "NBA player ID mapping is empty: [player] table missing or empty and use_api_fallback=False. "
+                "Streak enrichment will only work for rows with prizepicks_player.nba_player_id set. "
+                "Populate [player] (e.g. display_first_last) or set nba_player_id on prizepicks_player."
+            )
+        _nba_id_cache[cache_key] = {}
         return {}
     # Allow case-insensitive lookup: store under normalized lowercase key
-    return {_normalize_name(k).lower(): v for k, v in raw.items()}
+    result = {_normalize_name(k).lower(): v for k, v in raw.items()}
+    _nba_id_cache[cache_key] = result
+    return result
 
 
 def _opponent_from_matchup(matchup: str | None) -> str:
@@ -255,6 +287,91 @@ def _opponent_from_matchup(matchup: str | None) -> str:
     if " @ " in s:
         return s.split(" @ ")[-1].strip()[:3]
     return s[:3] if len(s) >= 3 else s
+
+
+# All player_stat columns needed for STAT_COLUMN_MAP (single, sum, and sub).
+_PLAYER_STAT_COLUMNS = (
+    "pts", "reb", "ast", "stl", "blk", "tov", "dreb", "oreb",
+    "fg3m", "fg3a", "fgm", "fga", "pf", "ftm", "fta",
+)
+
+
+def get_last_n_games_all_stats(
+    conn, nba_player_id: int, n: int = 5
+) -> list[dict]:
+    """Fetch last n games for a player with all stat columns. Returns list of dicts with game_date, matchup, and stat keys."""
+    if n < 1:
+        return []
+    cols = ", ".join(f"[{c}]" for c in _PLAYER_STAT_COLUMNS)
+    sql = f"""
+    SELECT TOP (?) CAST(game_date AS VARCHAR(20)) AS game_date, ISNULL(matchup, '') AS matchup, {cols}
+    FROM [dbo].[player_stat]
+    WHERE player_id = ?
+    ORDER BY game_date DESC
+    """
+    cursor = conn.cursor()
+    cursor.execute(sql, (n, nba_player_id))
+    columns = [c[0] for c in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _stat_value_from_row(
+    row: dict, stat_column: str | tuple[str, ...]
+) -> int:
+    """Compute stat value for one game row given stat_column (str, sum tuple, or sub tuple)."""
+    allowed = set(_PLAYER_STAT_COLUMNS)
+    if isinstance(stat_column, str):
+        cols = [stat_column]
+        sub = False
+    else:
+        t = tuple(stat_column)
+        if len(t) == 3 and t[2] == "sub":
+            cols = [t[0], t[1]]
+            sub = True
+        else:
+            cols = list(t)
+            sub = False
+    if not cols or any(c not in allowed for c in cols):
+        return 0
+    if sub and len(cols) == 2:
+        a = row.get(cols[0])
+        b = row.get(cols[1])
+        a = int(a) if a is not None else 0
+        b = int(b) if b is not None else 0
+        return a - b
+    total = 0
+    for c in cols:
+        v = row.get(c)
+        total += int(v) if v is not None else 0
+    return total
+
+
+def last_n_from_batch_rows(
+    rows: list[dict], stat_column: str | tuple[str, ...]
+) -> list[tuple[str, int, str]]:
+    """Convert batch game rows to (game_date, stat_value, opponent_abbrev) list. Same shape as get_last_n_stat_values."""
+    allowed = set(_PLAYER_STAT_COLUMNS)
+    if isinstance(stat_column, str):
+        cols = [stat_column]
+        sub = False
+    else:
+        t = tuple(stat_column)
+        if len(t) == 3 and t[2] == "sub":
+            cols = [t[0], t[1]]
+            sub = True
+        else:
+            cols = list(t)
+            sub = False
+    if not cols or any(c not in allowed for c in cols):
+        return []
+    out = []
+    for r in rows:
+        game_date = (r.get("game_date") or "").strip()[:20]
+        matchup = r.get("matchup") or ""
+        opp = _opponent_from_matchup(matchup)
+        val = _stat_value_from_row(r, stat_column)
+        out.append((game_date, val, opp))
+    return out
 
 
 def get_last_n_stat_values(
@@ -354,6 +471,59 @@ def get_historical_projection_lines(
     return out
 
 
+def get_historical_projection_lines_batch(
+    conn,
+    pp_player_id: str,
+    stat_type_names: list[str],
+    game_dates: list[str],
+) -> dict[tuple[str, str], float]:
+    """
+    Fetch historical line_score for one player, multiple stat types and dates, in one query.
+    Returns dict (stat_type_name_normalized, game_date_yyyy_mm_dd) -> line_score.
+    Prefers odds_type = 'standard' when multiple rows exist.
+    """
+    if not pp_player_id or not stat_type_names or not game_dates:
+        return {}
+    date_set = set()
+    for d in game_dates:
+        if d:
+            dstr = str(d).strip()[:10]
+            if len(dstr) >= 10:
+                date_set.add(dstr)
+    if not date_set:
+        return {}
+    stat_set = {s.strip() for s in stat_type_names if s and s.strip()}
+    if not stat_set:
+        return {}
+    placeholders_dates = ",".join("?" * len(date_set))
+    placeholders_stats = ",".join("?" * len(stat_set))
+    sql = f"""
+    SELECT CONVERT(VARCHAR(10), start_time, 120) AS game_date, LTRIM(RTRIM(stat_type_name)) AS stat_type_name, odds_type, line_score
+    FROM [dbo].[prizepicks_projection_history]
+    WHERE CAST(player_id AS NVARCHAR(20)) = ?
+      AND LTRIM(RTRIM(stat_type_name)) IN ({placeholders_stats})
+      AND CONVERT(VARCHAR(10), start_time, 120) IN ({placeholders_dates})
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        sql,
+        (str(pp_player_id).strip(), *sorted(stat_set), *sorted(date_set)),
+    )
+    key_to_line: dict[tuple[str, str], float] = {}
+    for row in cursor.fetchall():
+        d, stat, odds, line = (row[0] or "").strip()[:10], (row[1] or "").strip(), (row[2] or "").strip().lower(), row[3]
+        if not d or line is None:
+            continue
+        try:
+            line_f = float(line)
+        except (TypeError, ValueError):
+            continue
+        key = (stat, d)
+        if key not in key_to_line or odds == "standard":
+            key_to_line[key] = line_f
+    return key_to_line
+
+
 def _risk_from_cushion(cushion: float) -> str:
     """Return Low, Medium, or High based on cushion (min of last N minus line)."""
     if cushion >= 3:
@@ -371,11 +541,15 @@ def enrich_projections_with_streak(
 ) -> list[dict]:
     """
     Enrich each projection with favored, risk, cushion, last_n_values, last_n_dates, last_n_opponents.
+    Uses batched DB queries: one fetch for last N games (all stats) per nba_id, one for historical lines per pp_player_id.
     Does not close conn. Returns new list of dicts with added keys.
     """
     if streak_games < 1:
         streak_games = 5
-    out = []
+    # Resolve nba_id for each projection and group by nba_id for batch fetch
+    nba_id_to_batch_rows: dict[int, list[dict]] = {}
+    proj_meta: list[tuple[dict, int | None, str, str, str | tuple]] = []
+
     for proj in projections:
         row = dict(proj)
         stat_type = (proj.get("stat_type_name") or "").strip()
@@ -391,7 +565,7 @@ def enrich_projections_with_streak(
             row["last_n_opponents"] = []
             row["last_n_projection_lines"] = []
             row["streak_games"] = streak_games
-            out.append(row)
+            proj_meta.append((row, None, stat_type, "", stat_col))
             continue
         try:
             line_val = float(line)
@@ -404,9 +578,16 @@ def enrich_projections_with_streak(
             row["last_n_opponents"] = []
             row["last_n_projection_lines"] = []
             row["streak_games"] = streak_games
-            out.append(row)
+            proj_meta.append((row, None, stat_type, "", stat_col))
             continue
-        nba_id = name_to_nba_id.get(_normalize_name(display_name).lower())
+        nba_id = proj.get("nba_player_id")
+        if nba_id is not None:
+            try:
+                nba_id = int(nba_id)
+            except (TypeError, ValueError):
+                nba_id = None
+        if nba_id is None:
+            nba_id = name_to_nba_id.get(_normalize_name(display_name).lower())
         if nba_id is None:
             row["favored"] = False
             row["risk"] = None
@@ -416,28 +597,78 @@ def enrich_projections_with_streak(
             row["last_n_opponents"] = []
             row["last_n_projection_lines"] = []
             row["streak_games"] = streak_games
+        _raw = proj.get("pp_player_id")
+        pp_player_id = str(_raw).strip() if _raw is not None else ""
+        proj_meta.append((row, nba_id, stat_type, pp_player_id, stat_col))
+
+    # (pp_player_id, stat_type, date) -> line_score for historical lookup (keys per player so no collision)
+    hist_batch_cache: dict[tuple[str, str, str], float] = {}
+    # Batch fetch: for each nba_id that appears, get last N games (all stats) and historical lines
+    nba_ids_to_fetch = {m[1] for m in proj_meta if m[1] is not None}
+    for nba_id in nba_ids_to_fetch:
+        try:
+            batch_rows = get_last_n_games_all_stats(conn, nba_id, streak_games)
+        except Exception:
+            batch_rows = []
+        nba_id_to_batch_rows[nba_id] = batch_rows
+        # Collect (pp_player_id, stat_type_names, dates) for this nba_id's projections
+        pp_player_ids: dict[str, set[str]] = {}
+        dates_for_hist: set[str] = set()
+        for (row, pid, stat_type, pp_pid, stat_col) in proj_meta:
+            if pid != nba_id or not stat_type or not stat_col:
+                continue
+            dates_for_hist.update(
+                (r.get("game_date") or "").strip()[:10]
+                for r in batch_rows
+                if (r.get("game_date") or "").strip()[:10]
+            )
+            if pp_pid:
+                pp_player_ids.setdefault(pp_pid, set()).add(stat_type)
+        # One historical query per pp_player_id; cache by (pp_player_id, stat_type, date)
+        for pp_pid, stat_types in pp_player_ids.items():
+            try:
+                hist_map = get_historical_projection_lines_batch(
+                    conn, pp_pid, list(stat_types), list(dates_for_hist)
+                )
+            except Exception:
+                hist_map = {}
+            for (stat_type_key, date_key), line_val in hist_map.items():
+                hist_batch_cache[(pp_pid, stat_type_key, date_key)] = line_val
+
+    # Build output: for each projection, derive last_n and hist_lines from batch data
+    out = []
+    for (row, nba_id, stat_type, pp_player_id, stat_col) in proj_meta:
+        if row.get("last_n_values") is not None:
             out.append(row)
             continue
+        if nba_id is None or stat_col is None or not stat_type:
+            out.append(row)
+            continue  # already have empty streak set for nba_id is None
+        batch_rows = nba_id_to_batch_rows.get(nba_id, [])
+        last_n = last_n_from_batch_rows(batch_rows, stat_col)
+        dates = [d for d, _, _ in last_n]
+        def _hist_for_date(d: str) -> float | None:
+            dstr = (str(d).strip()[:10] if d else "") or ""
+            if len(dstr) < 10:
+                return None
+            return hist_batch_cache.get((pp_player_id, stat_type.strip(), dstr))
+        hist_lines = [_hist_for_date(d) for d in dates]
+        line_val = None
         try:
-            last_n = get_last_n_stat_values(conn, nba_id, stat_col, streak_games)
-        except Exception:
+            line_val = float(row.get("line_score"))
+        except (TypeError, ValueError):
+            pass
+        if line_val is None:
             row["favored"] = False
             row["risk"] = None
             row["cushion"] = None
-            row["last_n_values"] = []
-            row["last_n_dates"] = []
-            row["last_n_opponents"] = []
-            row["last_n_projection_lines"] = []
+            row["last_n_values"] = [v for _, v, _ in last_n]
+            row["last_n_dates"] = dates
+            row["last_n_opponents"] = [opp for _, _, opp in last_n]
+            row["last_n_projection_lines"] = hist_lines[: len(last_n)]
             row["streak_games"] = streak_games
             out.append(row)
             continue
-        dates = [d for d, _, _ in last_n]
-        try:
-            hist_lines = get_historical_projection_lines(
-                conn, proj.get("pp_player_id"), stat_type, dates
-            )
-        except Exception:
-            hist_lines = [None] * len(dates) if dates else []
         if len(last_n) < streak_games:
             row["favored"] = False
             row["risk"] = None
