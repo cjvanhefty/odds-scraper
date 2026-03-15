@@ -92,17 +92,8 @@
 
   <div class="section">
     <h2>Sport (PrizePicks)</h2>
-    <div class="controls" id="sportFilters">
-      <label><input type="checkbox" name="sport" value="7" id="sportNba" checked /> NBA</label>
-      <label><input type="checkbox" name="sport" value="9" id="sportFootball" /> Football</label>
-      <label><input type="checkbox" name="sport" value="82" id="sportSoccer" /> Soccer</label>
-      <label><input type="checkbox" name="sport" value="8" /> NHL</label>
-      <label><input type="checkbox" name="sport" value="2" /> MLB</label>
-      <label><input type="checkbox" name="sport" value="15" /> CFB</label>
-      <label><input type="checkbox" name="sport" value="20" /> CBB</label>
-      <label><input type="checkbox" name="sport" value="14" /> EPL</label>
-    </div>
-    <p class="muted" style="font-size: 0.85rem; margin: 0.25rem 0 0 0;">Only projections for the selected sports appear in the table below.</p>
+    <div class="controls" id="sportFilters"></div>
+    <p class="muted" style="font-size: 0.85rem; margin: 0.25rem 0 0 0;">Only one sport at a time. Options are based on active projections.</p>
   </div>
 
   <div class="section">
@@ -210,12 +201,51 @@
   <script>
     const API = '';
     let currentProjections = [];
+    var selectedLeagueId = null;
+    var LEAGUE_NAMES = { 2: 'MLB', 7: 'NBA', 8: 'NHL', 9: 'Football', 14: 'EPL', 15: 'CFB', 20: 'CBB', 82: 'Soccer' };
     var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
 
+    function getLeaguesFromProjections() {
+      var list = Array.isArray(currentProjections) ? currentProjections : [];
+      var byId = {};
+      list.forEach(function (r) {
+        var id = r.league_id != null ? String(r.league_id) : '';
+        if (!id) return;
+        var name = (r.league && (r.league + '').trim()) || LEAGUE_NAMES[r.league_id] || ('League ' + id);
+        byId[id] = name;
+      });
+      return Object.keys(byId).sort(function (a, b) {
+        return (LEAGUE_NAMES[a] || a).localeCompare(LEAGUE_NAMES[b] || b);
+      }).map(function (id) { return { id: id, name: byId[id] }; });
+    }
+
+    function renderSportFilters() {
+      var container = document.getElementById('sportFilters');
+      if (!container) return;
+      var leagues = getLeaguesFromProjections();
+      var currentChecked = document.querySelector('input[name="sport"]:checked');
+      var currentValue = currentChecked ? currentChecked.value : (selectedLeagueId != null ? String(selectedLeagueId) : null);
+      if (currentValue == null && leagues.length > 0) currentValue = leagues[0].id;
+      if (currentValue != null) selectedLeagueId = currentValue;
+      container.innerHTML = '';
+      leagues.forEach(function (league) {
+        var label = document.createElement('label');
+        var radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'sport';
+        radio.value = league.id;
+        if (league.id === currentValue) radio.checked = true;
+        label.appendChild(radio);
+        label.appendChild(document.createTextNode(' ' + league.name));
+        container.appendChild(label);
+      });
+    }
+
     function getSelectedLeagueIds() {
-      const checkboxes = document.querySelectorAll('input[name="sport"]:checked');
-      if (checkboxes.length === 0) return [7];
-      return Array.from(checkboxes).map(function (cb) { return cb.value; });
+      var radio = document.querySelector('input[name="sport"]:checked');
+      if (radio) return [radio.value];
+      if (selectedLeagueId != null) return [String(selectedLeagueId)];
+      return [7];
     }
 
     let currentPage = 1;
@@ -307,6 +337,11 @@
       const stat = getSelectedStat();
       const pageSize = parseInt(document.getElementById('pageSize').value, 10) || 50;
       var filtered = Array.isArray(currentProjections) ? currentProjections : [];
+      var selectedLeagueIds = getSelectedLeagueIds();
+      filtered = filtered.filter(function (r) {
+        var lid = r.league_id != null ? String(r.league_id) : '';
+        return selectedLeagueIds.indexOf(lid) >= 0;
+      });
       if (stat) {
         filtered = filtered.filter(function (r) { return (r.stat_type_name || '').trim() === stat; });
       } else {
@@ -374,8 +409,9 @@
         }
         const raw = await res.json();
         currentProjections = Array.isArray(raw) ? raw : [];
-        renderTableFromCurrent();
+        renderSportFilters();
         updateMainStatList();
+        renderTableFromCurrent();
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
       }
@@ -710,8 +746,12 @@
     document.getElementById('btnRefresh').addEventListener('click', loadProjections);
     document.getElementById('streakGames').addEventListener('change', function () { currentPage = 1; loadProjections(); });
     document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; renderTableFromCurrent(); });
-    document.querySelectorAll('input[name="sport"]').forEach(function (cb) {
-      cb.addEventListener('change', function () { currentPage = 1; updateMainStatList(); renderTableFromCurrent(); });
+    document.getElementById('sportFilters').addEventListener('change', function (e) {
+      if (e.target && e.target.name === 'sport') {
+        currentPage = 1;
+        updateMainStatList();
+        renderTableFromCurrent();
+      }
     });
 
     (function initMainStatList() {
