@@ -11,6 +11,11 @@
     h1 { font-size: 1.5rem; margin: 0 0 1rem 0; }
     .controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-bottom: 1rem; }
     .controls label { display: flex; align-items: center; gap: 0.5rem; }
+    .filter-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .filter-btn { padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #3a3f48; background: var(--card); color: var(--text); cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+    .filter-btn:hover { background: #3a3f48; }
+    .filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .filter-btn.selected { background: var(--accent); color: #fff; border-color: var(--accent); }
     .controls select, .controls input { padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid #3a3f48; background: var(--card); color: var(--text); }
     .btn { padding: 0.5rem 1rem; border-radius: 6px; border: none; cursor: pointer; font-weight: 500; background: var(--accent); color: #fff; }
     .btn:hover { filter: brightness(1.1); }
@@ -58,6 +63,8 @@
     .stat-row { padding: 0.35rem 0.5rem; border: 1px solid #2d323a; cursor: pointer; border-radius: 6px; flex-shrink: 0; }
     .stat-row:hover { background: #2d323a; }
     .stat-row.selected { background: rgba(91, 141, 239, 0.2); border-color: var(--accent); }
+    #mainStatList.stat-filter-buttons .stat-row { padding: 0.5rem 0.75rem; font-size: 0.9rem; }
+    #mainStatList.stat-filter-buttons .stat-row.selected { background: var(--accent); color: #fff; border-color: var(--accent); }
     .stat-name { font-weight: 500; font-size: 0.8rem; }
     .stat-detail { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #2d323a; }
     .odds-types { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
@@ -92,14 +99,14 @@
 
   <div class="section">
     <h2>Sport (PrizePicks)</h2>
-    <div class="controls" id="sportFilters"></div>
+    <div class="filter-buttons" id="sportFilters"></div>
     <p class="muted" style="font-size: 0.85rem; margin: 0.25rem 0 0 0;">Only one sport at a time. Options are based on active projections.</p>
   </div>
 
   <div class="section">
     <h2>Stat</h2>
     <p class="modal-stats-list-title" style="margin: 0 0 0.4rem 0;">Filter by stat type</p>
-    <div id="mainStatList" class="modal-stats-list"></div>
+    <div id="mainStatList" class="modal-stats-list stat-filter-buttons filter-buttons"></div>
   </div>
 
   <div class="section">
@@ -201,7 +208,7 @@
   <script>
     const API = '';
     let currentProjections = [];
-    var selectedLeagueId = null;
+    var selectedLeagueId = '7';
     var LEAGUE_NAMES = { 2: 'MLB', 7: 'NBA', 8: 'NHL', 9: 'Football', 14: 'EPL', 15: 'CFB', 20: 'CBB', 82: 'Soccer' };
     var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
 
@@ -223,27 +230,28 @@
       var container = document.getElementById('sportFilters');
       if (!container) return;
       var leagues = getLeaguesFromProjections();
-      var currentChecked = document.querySelector('input[name="sport"]:checked');
-      var currentValue = currentChecked ? currentChecked.value : (selectedLeagueId != null ? String(selectedLeagueId) : null);
-      if (currentValue == null && leagues.length > 0) currentValue = leagues[0].id;
+      var currentActive = container.querySelector('.filter-btn.active');
+      var currentValue = currentActive ? currentActive.getAttribute('data-league-id') : (selectedLeagueId != null ? String(selectedLeagueId) : null);
+      var leagueIds = leagues.map(function (l) { return l.id; });
+      if (currentValue == null || leagueIds.indexOf(currentValue) < 0) {
+        currentValue = (leagueIds.indexOf('7') >= 0 ? '7' : (leagues.length > 0 ? leagues[0].id : null));
+      }
       if (currentValue != null) selectedLeagueId = currentValue;
       container.innerHTML = '';
       leagues.forEach(function (league) {
-        var label = document.createElement('label');
-        var radio = document.createElement('input');
-        radio.type = 'radio';
-        radio.name = 'sport';
-        radio.value = league.id;
-        if (league.id === currentValue) radio.checked = true;
-        label.appendChild(radio);
-        label.appendChild(document.createTextNode(' ' + league.name));
-        container.appendChild(label);
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'filter-btn' + (league.id === currentValue ? ' active' : '');
+        btn.setAttribute('data-league-id', league.id);
+        btn.textContent = league.name;
+        container.appendChild(btn);
       });
     }
 
     function getSelectedLeagueIds() {
-      var radio = document.querySelector('input[name="sport"]:checked');
-      if (radio) return [radio.value];
+      var container = document.getElementById('sportFilters');
+      var activeBtn = container && container.querySelector('.filter-btn.active');
+      if (activeBtn) return [activeBtn.getAttribute('data-league-id')];
       if (selectedLeagueId != null) return [String(selectedLeagueId)];
       return [7];
     }
@@ -287,10 +295,10 @@
         return a.localeCompare(b);
       });
       var allSelected = prevStat === '' || statTypes.indexOf(prevStat) < 0;
-      var html = '<div class="stat-row' + (allSelected ? ' selected' : '') + '" data-stat=""><span class="stat-name">All</span></div>';
+      var html = '<button type="button" class="filter-btn stat-row' + (allSelected ? ' selected' : '') + '" data-stat="">All</button>';
       statTypes.forEach(function (s) {
         var sel = prevStat === s ? ' selected' : '';
-        html += '<div class="stat-row' + sel + '" data-stat="' + escapeHtml(s) + '"><span class="stat-name">' + escapeHtml(s) + '</span></div>';
+        html += '<button type="button" class="filter-btn stat-row' + sel + '" data-stat="' + escapeHtml(s) + '">' + escapeHtml(s) + '</button>';
       });
       listEl.innerHTML = html;
     }
@@ -746,17 +754,20 @@
     document.getElementById('btnRefresh').addEventListener('click', loadProjections);
     document.getElementById('streakGames').addEventListener('change', function () { currentPage = 1; loadProjections(); });
     document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; renderTableFromCurrent(); });
-    document.getElementById('sportFilters').addEventListener('change', function (e) {
-      if (e.target && e.target.name === 'sport') {
-        currentPage = 1;
-        updateMainStatList();
-        renderTableFromCurrent();
-      }
+    document.getElementById('sportFilters').addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest && e.target.closest('.filter-btn');
+      if (!btn || !btn.getAttribute('data-league-id')) return;
+      document.querySelectorAll('#sportFilters .filter-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      selectedLeagueId = btn.getAttribute('data-league-id');
+      currentPage = 1;
+      updateMainStatList();
+      renderTableFromCurrent();
     });
 
     (function initMainStatList() {
       var listEl = document.getElementById('mainStatList');
-      listEl.innerHTML = '<div class="stat-row selected" data-stat=""><span class="stat-name">All</span></div>';
+      listEl.innerHTML = '<button type="button" class="filter-btn stat-row selected" data-stat="">All</button>';
       listEl.addEventListener('click', function (e) {
         var row = e.target && e.target.closest && e.target.closest('.stat-row');
         if (!row) return;
