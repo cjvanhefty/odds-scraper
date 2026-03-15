@@ -259,6 +259,48 @@ def list_projections(
             conn.close()
 
 
+@app.get("/api/projections/last-five")
+def get_last_five_batch(
+    streak_games: int = Query(5, ge=1, le=20, description="Number of games for last-N stats"),
+):
+    """Return last N game stats for every NBA player (league_id=7) that has a projection. Client merges by (display_name, stat_type_name)."""
+    conn = None
+    try:
+        conn = get_conn()
+        projections = get_projections(
+            conn,
+            league_id=7,
+            odds_type="standard",
+            active_only=True,
+        )
+        if not projections:
+            return []
+        name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=True)
+        enriched = enrich_projections_with_streak(
+            conn, projections, name_to_nba_id, streak_games
+        )
+        out = []
+        for r in enriched:
+            out.append({
+                "display_name": (r.get("display_name") or r.get("pp_name") or "").strip(),
+                "stat_type_name": (r.get("stat_type_name") or "").strip(),
+                "favored": r.get("favored"),
+                "risk": r.get("risk"),
+                "cushion": r.get("cushion"),
+                "last_n_values": r.get("last_n_values") or [],
+                "last_n_dates": r.get("last_n_dates") or [],
+                "last_n_opponents": r.get("last_n_opponents") or [],
+                "last_n_projection_lines": r.get("last_n_projection_lines") or [],
+                "streak_games": r.get("streak_games") or 5,
+            })
+        return out
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/api/projections/last-updated")
 def get_projections_last_updated():
     """Return the most recent last_modified_at for PrizePicks projections (when they were last updated)."""
