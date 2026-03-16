@@ -1018,10 +1018,10 @@
     document.getElementById('btnUpdateNbaStats').addEventListener('click', updateNbaStats);
 
     var today = new Date();
-    var weekAgo = new Date(today);
-    weekAgo.setDate(weekAgo.getDate() - 7);
+    var twoDaysAgo = new Date(today);
+    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
     document.getElementById('dateTo').value = today.toISOString().slice(0, 10);
-    document.getElementById('dateFrom').value = weekAgo.toISOString().slice(0, 10);
+    document.getElementById('dateFrom').value = twoDaysAgo.toISOString().slice(0, 10);
 
     loadLastUpdated();
     loadProjections();
