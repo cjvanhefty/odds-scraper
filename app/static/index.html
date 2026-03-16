@@ -92,10 +92,24 @@
     .chart-label-projection { font-size: 0.65rem; color: var(--warn); text-align: center; margin-top: 0.1rem; display: block; }
     .chart-legend { margin-top: 0.5rem; }
     .chart-y-axis { font-size: 0.7rem; color: var(--muted); }
+    .header-row { position: sticky; top: 0; z-index: 10; background: var(--bg); padding: 0 0 0.5rem 0; margin: 0 -1rem 1rem -1rem; padding-left: 1rem; padding-right: 1rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .header-row h1 { margin: 0; }
+    .player-search-wrap { position: relative; flex: 1; min-width: 200px; max-width: 320px; }
+    .player-search-input { width: 100%; padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #3a3f48; background: var(--card); color: var(--text); font-size: 0.9rem; }
+    .player-search-input:focus { outline: none; border-color: var(--accent); }
+    .player-search-dropdown { position: absolute; left: 0; right: 0; top: 100%; margin-top: 2px; max-height: 280px; overflow-y: auto; background: var(--card); border: 1px solid #3a3f48; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 50; }
+    .player-search-item { display: block; width: 100%; padding: 0.5rem 0.75rem; text-align: left; border: none; background: none; color: var(--text); font-size: 0.9rem; cursor: pointer; }
+    .player-search-item:hover { background: #3a3f48; }
   </style>
 </head>
 <body>
-  <h1>PrizePicks Projections</h1>
+  <div class="header-row">
+    <h1>PrizePicks Projections</h1>
+    <div class="player-search-wrap">
+      <input type="text" id="playerSearchInput" class="player-search-input" placeholder="Search players..." autocomplete="off" />
+      <div id="playerSearchDropdown" class="player-search-dropdown" style="display: none;"></div>
+    </div>
+  </div>
 
   <div class="section">
     <h2>Sport (PrizePicks)</h2>
@@ -583,11 +597,6 @@
         var res = await fetch(API + '/api/projections?' + params.toString());
         if (!res.ok) throw new Error(await res.text());
         var list = await res.json();
-        var selectedLeagueIds = getSelectedLeagueIds();
-        list = list.filter(function (r) {
-          var lid = r.league_id != null ? String(r.league_id) : '';
-          return selectedLeagueIds.indexOf(lid) >= 0;
-        });
         modalState.list = list;
         var haveStreakFromGrid = mergeStreakFromGridIntoModalList(list);
         if (haveStreakFromGrid) modalState.streakLoading = false;
@@ -834,6 +843,48 @@
         this.classList.remove('open');
       }
     });
+
+    (function initPlayerSearch() {
+      var input = document.getElementById('playerSearchInput');
+      var dropdown = document.getElementById('playerSearchDropdown');
+      if (!input || !dropdown) return;
+      var debounceTimer = null;
+      var searchAbort = null;
+      function hideDropdown() { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }
+      function showDropdown(items) {
+        dropdown.innerHTML = items.map(function (p) {
+          var name = (p.display_name || '').trim();
+          if (!name) return '';
+          return '<button type="button" class="player-search-item" data-player="' + escapeHtml(name) + '">' + escapeHtml(name) + '</button>';
+        }).join('');
+        dropdown.style.display = 'block';
+        dropdown.querySelectorAll('.player-search-item').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var playerName = btn.getAttribute('data-player');
+            if (playerName) openPlayerModal(playerName);
+            input.value = '';
+            hideDropdown();
+            input.blur();
+          });
+        });
+      }
+      input.addEventListener('input', function () {
+        var q = (input.value || '').trim();
+        if (debounceTimer) clearTimeout(debounceTimer);
+        if (q.length < 1) { hideDropdown(); return; }
+        debounceTimer = setTimeout(function () {
+          debounceTimer = null;
+          if (searchAbort) searchAbort.abort();
+          searchAbort = new AbortController();
+          fetch(API + '/api/players?q=' + encodeURIComponent(q) + '&limit=20', { signal: searchAbort.signal })
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (list) { if (Array.isArray(list)) showDropdown(list); else hideDropdown(); })
+            .catch(function () { hideDropdown(); });
+        }, 250);
+      });
+      input.addEventListener('blur', function () { setTimeout(hideDropdown, 150); });
+      input.addEventListener('keydown', function (e) { if (e.key === 'Escape') { hideDropdown(); input.blur(); } });
+    })();
 
     function showUpdateMessage(text, isError) {
       var el = document.getElementById('updateMessage');

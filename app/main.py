@@ -422,6 +422,48 @@ def get_last_five_batch(
             conn.close()
 
 
+@app.get("/api/players")
+def list_players(
+    q: str | None = Query(None, description="Search prefix (case-insensitive)"),
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Return distinct player names from active projections (all leagues) for typeahead. Only includes players with upcoming games."""
+    conn = None
+    try:
+        conn = get_conn()
+        cursor = conn.cursor()
+        now_central = "CAST(GETUTCDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2(0))"
+        where_parts = [
+            "p.player_id IS NOT NULL",
+            "(p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')",
+            f"p.start_time >= DATEADD(day, -30, CAST({now_central} AS DATE))",
+            f"p.start_time >= {now_central}",
+        ]
+        where_sql = " AND ".join(where_parts)
+        params: list = [limit]  # TOP (?) is first in SQL
+        if q is not None and q.strip():
+            where_parts.append(
+                "LOWER(LTRIM(RTRIM(COALESCE(pp.display_name, pp.name)))) LIKE LOWER(?) + N'%'"
+            )
+            where_sql = " AND ".join(where_parts)
+            params.append(q.strip())
+        sql = f"""
+            SELECT DISTINCT TOP (?) LTRIM(RTRIM(COALESCE(pp.display_name, pp.name))) AS display_name
+            FROM [dbo].[prizepicks_projection] p
+            INNER JOIN [dbo].[prizepicks_player] pp ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
+            WHERE {where_sql}
+            ORDER BY display_name
+        """
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        return [{"display_name": (row[0] or "").strip()} for row in rows if row and (row[0] or "").strip()]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.get("/api/projections/last-updated")
 def get_projections_last_updated():
     """Return the most recent last_modified_at for PrizePicks projections (when they were last updated)."""
