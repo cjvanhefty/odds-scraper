@@ -587,7 +587,7 @@ def update_parlayplay_projections():
 
 @app.post("/api/update/underdog-projections")
 def update_underdog_projections():
-    """Run underdog_scraper.py --browser --db. Uses same DB auth as NBA/PrizePicks. Set PROPS_UNDERDOG_USER_DATA_DIR to use saved login."""
+    """Run underdog_scraper.py --db (tries httpx first, falls back to browser on 401/403). Set PROPS_UNDERDOG_USER_DATA_DIR for saved login fallback."""
     env = os.environ.copy()
     server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
     user = env.get("PROPS_DB_USER", "dbadmin")
@@ -597,7 +597,6 @@ def update_underdog_projections():
     cmd = [
         sys.executable,
         str(REPO_ROOT / "underdog_scraper.py"),
-        "--browser",
         "--db",
         "--db-server", server,
         "--db-user", user,
@@ -628,7 +627,11 @@ def update_underdog_projections():
                 detail = f"Scraper exited {result.returncode}: {err[:500]}"
             raise HTTPException(status_code=502, detail=detail)
         out = result.stdout or ""
-        if "Captured 0 projection records" in out:
+        if "Fetched 0 projection records via API." in out:
+            return {"ok": True, "message": "Underdog projections updated (0 lines).", "log": result.stdout}
+        if "No records after browser fallback" in out:
+            return {"ok": True, "message": "Underdog: 0 records after browser fallback (session may be expired). Run from CLI with --browser --headed to log in.", "log": result.stdout}
+        if "0 projection records" in out or "No records." in out:
             msg = "Underdog: 0 records."
             if "401" in out or "unauthorized" in out.lower():
                 msg = "Underdog: 0 records (session expired or not logged in). Run from CLI: python underdog_scraper.py --browser --user-data-dir .playwright-underdog --headed — log in, press Enter. Then try Update Underdog again."
