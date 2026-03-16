@@ -1,7 +1,8 @@
 """
 Underdog Fantasy projections scraper.
 Fetches player prop lines for matching with PrizePicks (same player + stat + game).
-Use --input to load from a JSON file, or --browser to capture from the app via Playwright.
+Uses httpx first (like PrizePicks); falls back to Playwright on 401/403.
+Use --input to load from a JSON file, or --browser to force browser capture.
 """
 
 import db_config  # noqa: F401 - load .env from repo root before DB
@@ -11,6 +12,8 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+
+import httpx
 
 # Map Underdog stat names to PrizePicks stat_type_name for matching
 STAT_NORMALIZE = {
@@ -128,6 +131,65 @@ def parse_records_from_json(data) -> list[dict]:
     return records
 
 
+# Globals to hold the most recent parsed entities from Underdog's over_under_lines API.
+_LAST_UNDERDOG_PLAYERS: list[dict] = []
+_LAST_UNDERDOG_APPEARANCES: list[dict] = []
+_LAST_UNDERDOG_GAMES: list[dict] = []
+_LAST_UNDERDOG_SOLO_GAMES: list[dict] = []
+_LAST_UNDERDOG_PROJECTIONS: list[dict] = []
+
+# Deduplication: only append to the lists above when id/key not already seen this run.
+_SEEN_UNDERDOG_PLAYER_IDS: set = set()
+_SEEN_UNDERDOG_APPEARANCE_IDS: set = set()
+_SEEN_UNDERDOG_GAME_IDS: set = set()
+_SEEN_UNDERDOG_SOLO_GAME_IDS: set = set()
+_SEEN_UNDERDOG_PROJECTION_KEYS: set = set()
+
+
+def _normalize_projection_record_minimal(r: dict) -> dict:
+    """Expand a 5-field fallback record to full underdog_projection_stage shape (missing keys -> None)."""
+    return {
+        "projection_id": r.get("projection_id"),
+        "display_name": r.get("display_name"),
+        "stat_type_name": r.get("stat_type_name"),
+        "line_score": r.get("line_score"),
+        "start_time": r.get("start_time"),
+        "api_id": None,
+        "over_under_id": None,
+        "provider_id": None,
+        "stat_value": None,
+        "line_type": None,
+        "status": None,
+        "rank": None,
+        "sort_by": None,
+        "stable_id": None,
+        "expires_at": None,
+        "updated_at": None,
+        "contract_terms_url": None,
+        "contract_url": None,
+        "live_event": None,
+        "live_event_stat": None,
+        "non_discounted_stat_value": None,
+        "ou_title": None,
+        "ou_category": None,
+        "ou_display_mode": None,
+        "ou_grid_display_title": None,
+        "ou_has_alternates": None,
+        "ou_option_priority": None,
+        "ou_prediction_market": None,
+        "ou_scoring_type_id": None,
+        "ou_team_divider": None,
+        "appearance_stat_id": None,
+        "appearance_id": None,
+        "display_stat": None,
+        "stat": None,
+        "graded_by": None,
+        "pickem_stat_id": None,
+        "appearance_stat_rank": None,
+        "options": None,
+    }
+
+
 def insert_underdog_stage(
     records: list[dict],
     server: str = "localhost\\SQLEXPRESS",
@@ -141,7 +203,46 @@ def insert_underdog_stage(
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
     conn = _get_db_conn(server, database, user, password, trusted_connection)
-    cols = ["projection_id", "display_name", "stat_type_name", "line_score", "start_time"]
+    cols = [
+        "projection_id",
+        "display_name",
+        "stat_type_name",
+        "line_score",
+        "start_time",
+        "api_id",
+        "over_under_id",
+        "provider_id",
+        "stat_value",
+        "line_type",
+        "status",
+        "rank",
+        "sort_by",
+        "stable_id",
+        "expires_at",
+        "updated_at",
+        "contract_terms_url",
+        "contract_url",
+        "live_event",
+        "live_event_stat",
+        "non_discounted_stat_value",
+        "ou_title",
+        "ou_category",
+        "ou_display_mode",
+        "ou_grid_display_title",
+        "ou_has_alternates",
+        "ou_option_priority",
+        "ou_prediction_market",
+        "ou_scoring_type_id",
+        "ou_team_divider",
+        "appearance_stat_id",
+        "appearance_id",
+        "display_stat",
+        "stat",
+        "graded_by",
+        "pickem_stat_id",
+        "appearance_stat_rank",
+        "options",
+    ]
     placeholders = ", ".join("?" * len(cols))
     with conn:
         cursor = conn.cursor()
@@ -163,20 +264,463 @@ def upsert_underdog_from_stage(
     password: str | None = None,
     trusted_connection: bool = False,
 ) -> int:
-    """MERGE underdog_projection_stage into underdog_projection. Returns rows merged."""
+    """MERGE underdog_projection_stage into underdog_projection, with history. Returns rows merged."""
     import pyodbc
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
     conn = _get_db_conn(server, database, user, password, trusted_connection)
-    sql = """
+
+    history_sql = """
+    INSERT INTO [dbo].[underdog_projection_history] (
+        projection_id, display_name, stat_type_name, line_score, start_time,
+        api_id, over_under_id, provider_id, stat_value, line_type, status, rank,
+        sort_by, stable_id, expires_at, updated_at, contract_terms_url, contract_url,
+        live_event, live_event_stat, non_discounted_stat_value,
+        ou_title, ou_category, ou_display_mode, ou_grid_display_title,
+        ou_has_alternates, ou_option_priority, ou_prediction_market,
+        ou_scoring_type_id, ou_team_divider,
+        appearance_stat_id, appearance_id, display_stat, stat, graded_by,
+        pickem_stat_id, appearance_stat_rank,
+        options,
+        created_at, last_modified_at
+    )
+    SELECT
+        p.projection_id,
+        p.display_name,
+        p.stat_type_name,
+        p.line_score,
+        p.start_time,
+        p.api_id,
+        p.over_under_id,
+        p.provider_id,
+        p.stat_value,
+        p.line_type,
+        p.status,
+        p.rank,
+        p.sort_by,
+        p.stable_id,
+        p.expires_at,
+        p.updated_at,
+        p.contract_terms_url,
+        p.contract_url,
+        p.live_event,
+        p.live_event_stat,
+        p.non_discounted_stat_value,
+        p.ou_title,
+        p.ou_category,
+        p.ou_display_mode,
+        p.ou_grid_display_title,
+        p.ou_has_alternates,
+        p.ou_option_priority,
+        p.ou_prediction_market,
+        p.ou_scoring_type_id,
+        p.ou_team_divider,
+        p.appearance_stat_id,
+        p.appearance_id,
+        p.display_stat,
+        p.stat,
+        p.graded_by,
+        p.pickem_stat_id,
+        p.appearance_stat_rank,
+        p.options,
+        SYSUTCDATETIME() AS created_at,
+        p.last_modified_at
+    FROM [dbo].[underdog_projection] p
+    INNER JOIN [dbo].[underdog_projection_stage] s
+        ON p.projection_id = s.projection_id
+    WHERE
+        (p.line_score <> s.line_score
+         OR (p.line_score IS NULL AND s.line_score IS NOT NULL)
+         OR (p.line_score IS NOT NULL AND s.line_score IS NULL))
+        AND NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[underdog_projection_history] h
+            WHERE h.projection_id = p.projection_id
+              AND ((h.line_score = p.line_score)
+                   OR (h.line_score IS NULL AND p.line_score IS NULL))
+        );
+    """
+
+    move_expired_sql = """
+    DECLARE @nowUtc datetimeoffset(3) = SYSUTCDATETIME();
+
+    INSERT INTO [dbo].[underdog_projection_history] (
+        projection_id, display_name, stat_type_name, line_score, start_time,
+        api_id, over_under_id, provider_id, stat_value, line_type, status, rank,
+        sort_by, stable_id, expires_at, updated_at, contract_terms_url, contract_url,
+        live_event, live_event_stat, non_discounted_stat_value,
+        ou_title, ou_category, ou_display_mode, ou_grid_display_title,
+        ou_has_alternates, ou_option_priority, ou_prediction_market,
+        ou_scoring_type_id, ou_team_divider,
+        appearance_stat_id, appearance_id, display_stat, stat, graded_by,
+        pickem_stat_id, appearance_stat_rank,
+        options,
+        created_at, last_modified_at
+    )
+    SELECT
+        p.projection_id,
+        p.display_name,
+        p.stat_type_name,
+        p.line_score,
+        p.start_time,
+        p.api_id,
+        p.over_under_id,
+        p.provider_id,
+        p.stat_value,
+        p.line_type,
+        p.status,
+        p.rank,
+        p.sort_by,
+        p.stable_id,
+        p.expires_at,
+        p.updated_at,
+        p.contract_terms_url,
+        p.contract_url,
+        p.live_event,
+        p.live_event_stat,
+        p.non_discounted_stat_value,
+        p.ou_title,
+        p.ou_category,
+        p.ou_display_mode,
+        p.ou_grid_display_title,
+        p.ou_has_alternates,
+        p.ou_option_priority,
+        p.ou_prediction_market,
+        p.ou_scoring_type_id,
+        p.ou_team_divider,
+        p.appearance_stat_id,
+        p.appearance_id,
+        p.display_stat,
+        p.stat,
+        p.graded_by,
+        p.pickem_stat_id,
+        p.appearance_stat_rank,
+        p.options,
+        @nowUtc AS created_at,
+        p.last_modified_at
+    FROM [dbo].[underdog_projection] p
+    WHERE p.start_time IS NOT NULL
+      AND p.start_time < @nowUtc
+      AND NOT EXISTS (
+          SELECT 1
+          FROM [dbo].[underdog_projection_history] h
+          WHERE h.projection_id = p.projection_id
+            AND h.start_time = p.start_time
+      );
+
+    DELETE FROM [dbo].[underdog_projection]
+    WHERE start_time IS NOT NULL
+      AND start_time < @nowUtc;
+    """
+
+    merge_sql = """
     MERGE [dbo].[underdog_projection] AS t
     USING [dbo].[underdog_projection_stage] AS s
-    ON t.projection_id = s.projection_id
-    WHEN MATCHED AND (ISNULL(t.line_score,-1) <> ISNULL(s.line_score,-1) OR ISNULL(t.start_time,'') <> ISNULL(CAST(s.start_time AS nvarchar(50)),''))
-        THEN UPDATE SET display_name = s.display_name, stat_type_name = s.stat_type_name, line_score = s.line_score, start_time = s.start_time, last_modified_at = GETUTCDATE()
+      ON t.projection_id = s.projection_id
+    WHEN MATCHED AND (
+        ISNULL(t.line_score,-1) <> ISNULL(s.line_score,-1)
+        OR ISNULL(t.start_time,'') <> ISNULL(CAST(s.start_time AS nvarchar(50)),'')
+    )
+      THEN UPDATE SET
+        display_name = s.display_name,
+        stat_type_name = s.stat_type_name,
+        line_score = s.line_score,
+        start_time = s.start_time,
+        api_id = s.api_id,
+        over_under_id = s.over_under_id,
+        provider_id = s.provider_id,
+        stat_value = s.stat_value,
+        line_type = s.line_type,
+        status = s.status,
+        rank = s.rank,
+        sort_by = s.sort_by,
+        stable_id = s.stable_id,
+        expires_at = s.expires_at,
+        updated_at = s.updated_at,
+        contract_terms_url = s.contract_terms_url,
+        contract_url = s.contract_url,
+        live_event = s.live_event,
+        live_event_stat = s.live_event_stat,
+        non_discounted_stat_value = s.non_discounted_stat_value,
+        ou_title = s.ou_title,
+        ou_category = s.ou_category,
+        ou_display_mode = s.ou_display_mode,
+        ou_grid_display_title = s.ou_grid_display_title,
+        ou_has_alternates = s.ou_has_alternates,
+        ou_option_priority = s.ou_option_priority,
+        ou_prediction_market = s.ou_prediction_market,
+        ou_scoring_type_id = s.ou_scoring_type_id,
+        ou_team_divider = s.ou_team_divider,
+        appearance_stat_id = s.appearance_stat_id,
+        appearance_id = s.appearance_id,
+        display_stat = s.display_stat,
+        stat = s.stat,
+        graded_by = s.graded_by,
+        pickem_stat_id = s.pickem_stat_id,
+        appearance_stat_rank = s.appearance_stat_rank,
+        options = s.options,
+        last_modified_at = GETUTCDATE()
     WHEN NOT MATCHED BY TARGET
-        THEN INSERT (projection_id, display_name, stat_type_name, line_score, start_time, last_modified_at)
-        VALUES (s.projection_id, s.display_name, s.stat_type_name, s.line_score, s.start_time, GETUTCDATE());
+      THEN INSERT (
+        projection_id, display_name, stat_type_name, line_score, start_time,
+        api_id, over_under_id, provider_id, stat_value, line_type,
+        status, rank, sort_by, stable_id, expires_at, updated_at,
+        contract_terms_url, contract_url, live_event, live_event_stat,
+        non_discounted_stat_value, ou_title, ou_category, ou_display_mode,
+        ou_grid_display_title, ou_has_alternates, ou_option_priority,
+        ou_prediction_market, ou_scoring_type_id, ou_team_divider,
+        appearance_stat_id, appearance_id, display_stat, stat, graded_by,
+        pickem_stat_id, appearance_stat_rank, options, last_modified_at
+      )
+      VALUES (
+        s.projection_id, s.display_name, s.stat_type_name, s.line_score, s.start_time,
+        s.api_id, s.over_under_id, s.provider_id, s.stat_value, s.line_type,
+        s.status, s.rank, s.sort_by, s.stable_id, s.expires_at, s.updated_at,
+        s.contract_terms_url, s.contract_url, s.live_event, s.live_event_stat,
+        s.non_discounted_stat_value, s.ou_title, s.ou_category, s.ou_display_mode,
+        s.ou_grid_display_title, s.ou_has_alternates, s.ou_option_priority,
+        s.ou_prediction_market, s.ou_scoring_type_id, s.ou_team_divider,
+        s.appearance_stat_id, s.appearance_id, s.display_stat, s.stat, s.graded_by,
+        s.pickem_stat_id, s.appearance_stat_rank, s.options, GETUTCDATE()
+      );
+    """
+
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(history_sql)
+        cursor.execute(merge_sql)
+        merged = cursor.rowcount
+        cursor.execute(move_expired_sql)
+    conn.close()
+    return merged
+
+
+def upsert_underdog_player_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """MERGE underdog_player_stage into underdog_player. Returns rows affected."""
+    import pyodbc
+
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    sql = """
+    MERGE [dbo].[underdog_player] AS t
+    USING [dbo].[underdog_player_stage] AS s
+      ON t.id = s.id
+    WHEN MATCHED THEN
+      UPDATE SET
+        t.first_name = s.first_name,
+        t.last_name = s.last_name,
+        t.position_display_name = s.position_display_name,
+        t.position_id = s.position_id,
+        t.position_name = s.position_name,
+        t.team_id = s.team_id,
+        t.sport_id = s.sport_id,
+        t.jersey_number = s.jersey_number,
+        t.image_url = s.image_url,
+        t.dark_image_url = s.dark_image_url,
+        t.light_image_url = s.light_image_url,
+        t.action_path = s.action_path,
+        t.country = s.country,
+        t.last_modified_at = GETUTCDATE()
+    WHEN NOT MATCHED BY TARGET THEN
+      INSERT (
+        id, first_name, last_name, position_display_name, position_id,
+        position_name, team_id, sport_id, jersey_number, image_url,
+        dark_image_url, light_image_url, action_path, country, last_modified_at
+      )
+      VALUES (
+        s.id, s.first_name, s.last_name, s.position_display_name, s.position_id,
+        s.position_name, s.team_id, s.sport_id, s.jersey_number, s.image_url,
+        s.dark_image_url, s.light_image_url, s.action_path, s.country, GETUTCDATE()
+      );
+    """
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        count = cursor.rowcount
+    conn.close()
+    return count
+
+
+def upsert_underdog_appearance_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """MERGE underdog_appearance_stage into underdog_appearance. Returns rows affected."""
+    import pyodbc
+
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    sql = """
+    MERGE [dbo].[underdog_appearance] AS t
+    USING [dbo].[underdog_appearance_stage] AS s
+      ON t.id = s.id
+    WHEN MATCHED THEN
+      UPDATE SET
+        t.player_id = s.player_id,
+        t.match_id = s.match_id,
+        t.match_type = s.match_type,
+        t.team_id = s.team_id,
+        t.position_id = s.position_id,
+        t.lineup_status_id = s.lineup_status_id,
+        t.sort_by = s.sort_by,
+        t.multiple_picks_allowed = s.multiple_picks_allowed,
+        t.type = s.type,
+        t.last_modified_at = GETUTCDATE()
+    WHEN NOT MATCHED BY TARGET THEN
+      INSERT (
+        id, player_id, match_id, match_type, team_id,
+        position_id, lineup_status_id, sort_by,
+        multiple_picks_allowed, type, last_modified_at
+      )
+      VALUES (
+        s.id, s.player_id, s.match_id, s.match_type, s.team_id,
+        s.position_id, s.lineup_status_id, s.sort_by,
+        s.multiple_picks_allowed, s.type, GETUTCDATE()
+      );
+    """
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        count = cursor.rowcount
+    conn.close()
+    return count
+
+
+def upsert_underdog_game_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """MERGE underdog_game_stage into underdog_game. Returns rows affected."""
+    import pyodbc
+
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    sql = """
+    MERGE [dbo].[underdog_game] AS t
+    USING [dbo].[underdog_game_stage] AS s
+      ON t.id = s.id
+    WHEN MATCHED THEN
+      UPDATE SET
+        t.scheduled_at = s.scheduled_at,
+        t.home_team_id = s.home_team_id,
+        t.away_team_id = s.away_team_id,
+        t.title = s.title,
+        t.short_title = s.short_title,
+        t.abbreviated_title = s.abbreviated_title,
+        t.full_team_names_title = s.full_team_names_title,
+        t.status = s.status,
+        t.sport_id = s.sport_id,
+        t.type = s.type,
+        t.period = s.period,
+        t.match_progress = s.match_progress,
+        t.away_team_score = s.away_team_score,
+        t.home_team_score = s.home_team_score,
+        t.rank = s.rank,
+        t.year = s.year,
+        t.season_type = s.season_type,
+        t.updated_at = s.updated_at,
+        t.rescheduled_from = s.rescheduled_from,
+        t.title_suffix = s.title_suffix,
+        t.manually_created = s.manually_created,
+        t.pre_game_data = s.pre_game_data,
+        t.last_modified_at = GETUTCDATE()
+    WHEN NOT MATCHED BY TARGET THEN
+      INSERT (
+        id, scheduled_at, home_team_id, away_team_id,
+        title, short_title, abbreviated_title, full_team_names_title,
+        status, sport_id, type, period, match_progress,
+        away_team_score, home_team_score, rank, year, season_type,
+        updated_at, rescheduled_from, title_suffix, manually_created,
+        pre_game_data, last_modified_at
+      )
+      VALUES (
+        s.id, s.scheduled_at, s.home_team_id, s.away_team_id,
+        s.title, s.short_title, s.abbreviated_title, s.full_team_names_title,
+        s.status, s.sport_id, s.type, s.period, s.match_progress,
+        s.away_team_score, s.home_team_score, s.rank, s.year, s.season_type,
+        s.updated_at, s.rescheduled_from, s.title_suffix, s.manually_created,
+        s.pre_game_data, GETUTCDATE()
+      );
+    """
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        count = cursor.rowcount
+    conn.close()
+    return count
+
+
+def upsert_underdog_solo_game_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """MERGE underdog_solo_game_stage into underdog_solo_game. Returns rows affected."""
+    import pyodbc
+
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    sql = """
+    MERGE [dbo].[underdog_solo_game] AS t
+    USING [dbo].[underdog_solo_game_stage] AS s
+      ON t.id = s.id
+    WHEN MATCHED THEN
+      UPDATE SET
+        t.scheduled_at = s.scheduled_at,
+        t.home_player_id = s.home_player_id,
+        t.away_player_id = s.away_player_id,
+        t.title = s.title,
+        t.short_title = s.short_title,
+        t.abbreviated_title = s.abbreviated_title,
+        t.full_title = s.full_title,
+        t.status = s.status,
+        t.sport_id = s.sport_id,
+        t.type = s.type,
+        t.competition_id = s.competition_id,
+        t.rank = s.rank,
+        t.period = s.period,
+        t.match_progress = s.match_progress,
+        t.score = s.score,
+        t.updated_at = s.updated_at,
+        t.manually_created = s.manually_created,
+        t.sport_tournament_round_id = s.sport_tournament_round_id,
+        t.pre_game_data = s.pre_game_data,
+        t.last_modified_at = GETUTCDATE()
+    WHEN NOT MATCHED BY TARGET THEN
+      INSERT (
+        id, scheduled_at, home_player_id, away_player_id,
+        title, short_title, abbreviated_title, full_title,
+        status, sport_id, type, competition_id, rank,
+        period, match_progress, score, updated_at,
+        manually_created, sport_tournament_round_id, pre_game_data,
+        last_modified_at
+      )
+      VALUES (
+        s.id, s.scheduled_at, s.home_player_id, s.away_player_id,
+        s.title, s.short_title, s.abbreviated_title, s.full_title,
+        s.status, s.sport_id, s.type, s.competition_id, s.rank,
+        s.period, s.match_progress, s.score, s.updated_at,
+        s.manually_created, s.sport_tournament_round_id, s.pre_game_data,
+        GETUTCDATE()
+      );
     """
     with conn:
         cursor = conn.cursor()
@@ -187,6 +731,42 @@ def upsert_underdog_from_stage(
 
 
 OVER_UNDER_LINES_URL = "https://api.underdogfantasy.com/beta/v5/over_under_lines"
+
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.underdogfantasy.com/",
+    "Origin": "https://www.underdogfantasy.com",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+}
+
+
+def fetch_over_under_httpx(timeout: float = 30) -> tuple[list[dict], int | None]:
+    """
+    Fetch over_under_lines from Underdog API via httpx (no browser).
+    Returns (records, None) on success, ([], status_code) on 401/403, ([], None) on other error.
+    """
+    try:
+        with httpx.Client(headers=DEFAULT_HEADERS, timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(OVER_UNDER_LINES_URL)
+            if resp.status_code == 401:
+                return ([], 401)
+            if resp.status_code == 403:
+                return ([], 403)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError:
+        return ([], None)
+    except Exception:
+        return ([], None)
+    records = parse_underdog_over_under_api(data) if isinstance(data, dict) else []
+    return (records, None)
 
 
 def _normalize_to_list(val):
@@ -222,6 +802,7 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
     raw_players = pickem_data.get("players") or []
     raw_appearances = pickem_data.get("appearances") or []
     raw_games = pickem_data.get("games") or []
+    raw_solo_games = pickem_data.get("solo_games") or []
     raw_oul = pickem_data.get("over_under_lines") or []
     players = _normalize_to_dict(raw_players)
     if not players and isinstance(raw_players, list):
@@ -231,8 +812,37 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
         games = {str(g.get("id")): g for g in raw_games if isinstance(g, dict)}
     appearances = _normalize_to_list(raw_appearances)
     over_under_lines = _normalize_to_list(raw_oul)
+    solo_games = _normalize_to_list(raw_solo_games)
 
-    # appearance_id -> (display_name, start_time_iso)
+    # Build stage lists for players, appearances, games, solo_games (dedupe by id per run)
+    global _LAST_UNDERDOG_PLAYERS, _LAST_UNDERDOG_APPEARANCES, _LAST_UNDERDOG_GAMES, _LAST_UNDERDOG_SOLO_GAMES, _LAST_UNDERDOG_PROJECTIONS
+    global _SEEN_UNDERDOG_PLAYER_IDS, _SEEN_UNDERDOG_APPEARANCE_IDS, _SEEN_UNDERDOG_GAME_IDS, _SEEN_UNDERDOG_SOLO_GAME_IDS, _SEEN_UNDERDOG_PROJECTION_KEYS
+    for p in players.values():
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id")
+        if pid is None or pid in _SEEN_UNDERDOG_PLAYER_IDS:
+            continue
+        _SEEN_UNDERDOG_PLAYER_IDS.add(pid)
+        _LAST_UNDERDOG_PLAYERS.append(
+            {
+                "id": pid,
+                "first_name": (p.get("first_name") or "").strip(),
+                "last_name": (p.get("last_name") or "").strip(),
+                "position_display_name": p.get("position_display_name"),
+                "position_id": p.get("position_id"),
+                "position_name": p.get("position_name"),
+                "team_id": p.get("team_id"),
+                "sport_id": p.get("sport_id"),
+                "jersey_number": p.get("jersey_number"),
+                "image_url": p.get("image_url"),
+                "dark_image_url": p.get("dark_image_url"),
+                "light_image_url": p.get("light_image_url"),
+                "action_path": p.get("action_path"),
+                "country": p.get("country"),
+            }
+        )
+
     appearance_info = {}
     for a in appearances:
         if not isinstance(a, dict):
@@ -261,8 +871,90 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
             name = f"{first} {last}".strip() or (p.get("full_name") or p.get("display_name") or "")
         if aid is not None:
             appearance_info[aid] = (name, start_time)
+            if aid not in _SEEN_UNDERDOG_APPEARANCE_IDS:
+                _SEEN_UNDERDOG_APPEARANCE_IDS.add(aid)
+                _LAST_UNDERDOG_APPEARANCES.append(
+                    {
+                        "id": aid,
+                        "player_id": pid,
+                        "match_id": gid,
+                        "match_type": a.get("match_type"),
+                        "team_id": a.get("team_id"),
+                        "position_id": a.get("position_id"),
+                        "lineup_status_id": a.get("lineup_status_id"),
+                        "sort_by": a.get("sort_by"),
+                        "multiple_picks_allowed": a.get("multiple_picks_allowed"),
+                        "type": a.get("type"),
+                    }
+                )
 
-    seen = set()
+    for g in games.values():
+        if not isinstance(g, dict):
+            continue
+        gid = g.get("id")
+        if gid is None or gid in _SEEN_UNDERDOG_GAME_IDS:
+            continue
+        _SEEN_UNDERDOG_GAME_IDS.add(gid)
+        _LAST_UNDERDOG_GAMES.append(
+            {
+                "id": gid,
+                "scheduled_at": g.get("scheduled_at"),
+                "home_team_id": g.get("home_team_id"),
+                "away_team_id": g.get("away_team_id"),
+                "title": g.get("title"),
+                "short_title": g.get("short_title"),
+                "abbreviated_title": g.get("abbreviated_title"),
+                "full_team_names_title": g.get("full_team_names_title"),
+                "status": g.get("status"),
+                "sport_id": g.get("sport_id"),
+                "type": g.get("type"),
+                "period": g.get("period"),
+                "match_progress": g.get("match_progress"),
+                "away_team_score": g.get("away_team_score"),
+                "home_team_score": g.get("home_team_score"),
+                "rank": g.get("rank"),
+                "year": g.get("year"),
+                "season_type": g.get("season_type"),
+                "updated_at": g.get("updated_at"),
+                "rescheduled_from": g.get("rescheduled_from"),
+                "title_suffix": g.get("title_suffix"),
+                "manually_created": g.get("manually_created"),
+                "pre_game_data": json.dumps(g.get("pre_game_data")) if g.get("pre_game_data") is not None else None,
+            }
+        )
+
+    for sg in solo_games:
+        if not isinstance(sg, dict):
+            continue
+        sgid = sg.get("id")
+        if sgid is None or sgid in _SEEN_UNDERDOG_SOLO_GAME_IDS:
+            continue
+        _SEEN_UNDERDOG_SOLO_GAME_IDS.add(sgid)
+        _LAST_UNDERDOG_SOLO_GAMES.append(
+            {
+                "id": sgid,
+                "scheduled_at": sg.get("scheduled_at"),
+                "home_player_id": sg.get("home_player_id"),
+                "away_player_id": sg.get("away_player_id"),
+                "title": sg.get("title"),
+                "short_title": sg.get("short_title"),
+                "abbreviated_title": sg.get("abbreviated_title"),
+                "full_title": sg.get("full_title"),
+                "status": sg.get("status"),
+                "sport_id": sg.get("sport_id"),
+                "type": sg.get("type"),
+                "competition_id": sg.get("competition_id"),
+                "rank": sg.get("rank"),
+                "period": sg.get("period"),
+                "match_progress": sg.get("match_progress"),
+                "score": sg.get("score"),
+                "updated_at": sg.get("updated_at"),
+                "manually_created": sg.get("manually_created"),
+                "sport_tournament_round_id": sg.get("sport_tournament_round_id"),
+                "pre_game_data": json.dumps(sg.get("pre_game_data")) if sg.get("pre_game_data") is not None else None,
+            }
+        )
+
     for oul in over_under_lines:
         if not isinstance(oul, dict):
             continue
@@ -281,14 +973,14 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
             except (TypeError, ValueError):
                 default_line = None
         options = oul.get("options") or []
+        ou = oul.get("over_under") or {}
+        options_json = json.dumps(options) if options else None
+
         for opt in options:
             if not isinstance(opt, dict):
                 continue
             line = opt.get("line") or opt.get("line_score")
-            if line is None and default_line is not None:
-                line = default_line
             if line is None:
-                # Parse from choice_display_name_shorter e.g. "H 5.5" or "L 8.5"
                 short = (opt.get("choice_display_name_shorter") or "").strip()
                 if short:
                     parts = short.split()
@@ -303,22 +995,67 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
                     line = float(line)
                 except (TypeError, ValueError):
                     line = None
+            if line is None and default_line is not None:
+                line = default_line
             if line is None:
                 continue
+
             key = (name, stat, start_time, line)
-            if key in seen:
+            if key in _SEEN_UNDERDOG_PROJECTION_KEYS:
                 continue
-            seen.add(key)
+            _SEEN_UNDERDOG_PROJECTION_KEYS.add(key)
+
             projection_id = hash(key) & 0x7FFFFFFF
             if projection_id < 0:
                 projection_id = -projection_id
-            records.append({
+
+            record = {
                 "projection_id": projection_id,
                 "display_name": (name or "")[:100],
                 "stat_type_name": stat[:100],
                 "line_score": line,
                 "start_time": start_time or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            })
+                # Expanded over_under_lines fields
+                "api_id": oul.get("id"),
+                "over_under_id": oul.get("over_under_id"),
+                "provider_id": oul.get("provider_id"),
+                "stat_value": float(oul["stat_value"]) if isinstance(oul.get("stat_value"), (int, float, str)) and str(oul.get("stat_value")).replace(".", "", 1).lstrip("-").isdigit() else None,
+                "line_type": oul.get("line_type"),
+                "status": oul.get("status"),
+                "rank": oul.get("rank"),
+                "sort_by": oul.get("sort_by"),
+                "stable_id": oul.get("stable_id"),
+                "expires_at": oul.get("expires_at"),
+                "updated_at": oul.get("updated_at"),
+                "contract_terms_url": oul.get("contract_terms_url"),
+                "contract_url": oul.get("contract_url"),
+                "live_event": oul.get("live_event"),
+                "live_event_stat": oul.get("live_event_stat"),
+                "non_discounted_stat_value": oul.get("non_discounted_stat_value"),
+                # Nested over_under
+                "ou_title": ou.get("title"),
+                "ou_category": ou.get("category"),
+                "ou_display_mode": ou.get("display_mode"),
+                "ou_grid_display_title": ou.get("grid_display_title"),
+                "ou_has_alternates": ou.get("has_alternates"),
+                "ou_option_priority": ou.get("option_priority"),
+                "ou_prediction_market": ou.get("prediction_market"),
+                "ou_scoring_type_id": ou.get("scoring_type_id"),
+                "ou_team_divider": ou.get("team_divider"),
+                # Nested appearance_stat
+                "appearance_stat_id": appearance_stat.get("id"),
+                "appearance_id": appearance_stat.get("appearance_id"),
+                "display_stat": appearance_stat.get("display_stat"),
+                "stat": appearance_stat.get("stat"),
+                "graded_by": appearance_stat.get("graded_by"),
+                "pickem_stat_id": appearance_stat.get("pickem_stat_id"),
+                "appearance_stat_rank": appearance_stat.get("rank"),
+                # Options JSON
+                "options": options_json,
+            }
+            records.append(record)
+            _LAST_UNDERDOG_PROJECTIONS.append(record)
+
     return records
 
 
@@ -471,6 +1208,7 @@ def fetch_with_playwright(
     records = []
     # Prefer records from direct over_under_lines API fetch (passed back from page.evaluate path)
     if api_records:
+        # api_records is already the parsed projections from parse_underdog_over_under_api
         records = api_records
     else:
         for c in captured:
@@ -501,6 +1239,21 @@ def main():
     parser.add_argument("--trusted-connection", action="store_true", help="Use Windows Authentication")
     parser.add_argument("--database", default="Props")
     args = parser.parse_args()
+
+    # Clear global caches and dedupe sets for this run so multiple parse_underdog_over_under_api()
+    # calls accumulate consistently without duplicate entity rows in stage tables.
+    global _LAST_UNDERDOG_PLAYERS, _LAST_UNDERDOG_APPEARANCES, _LAST_UNDERDOG_GAMES, _LAST_UNDERDOG_SOLO_GAMES, _LAST_UNDERDOG_PROJECTIONS
+    global _SEEN_UNDERDOG_PLAYER_IDS, _SEEN_UNDERDOG_APPEARANCE_IDS, _SEEN_UNDERDOG_GAME_IDS, _SEEN_UNDERDOG_SOLO_GAME_IDS, _SEEN_UNDERDOG_PROJECTION_KEYS
+    _LAST_UNDERDOG_PLAYERS = []
+    _LAST_UNDERDOG_APPEARANCES = []
+    _LAST_UNDERDOG_GAMES = []
+    _LAST_UNDERDOG_SOLO_GAMES = []
+    _LAST_UNDERDOG_PROJECTIONS = []
+    _SEEN_UNDERDOG_PLAYER_IDS = set()
+    _SEEN_UNDERDOG_APPEARANCE_IDS = set()
+    _SEEN_UNDERDOG_GAME_IDS = set()
+    _SEEN_UNDERDOG_SOLO_GAME_IDS = set()
+    _SEEN_UNDERDOG_PROJECTION_KEYS = set()
 
     records = []
     if args.input:
@@ -534,8 +1287,30 @@ def main():
         )
         print(f"Captured {len(records)} projection records (raw saved to {path})")
     else:
-        print("Use --input <file.json> to load data, or --browser to capture from the app.")
-        return 0
+        # Try httpx first (same as PrizePicks)
+        records, err = fetch_over_under_httpx()
+        did_fallback = False
+        if err in (401, 403):
+            print(f"API returned {err}; falling back to browser capture.")
+            did_fallback = True
+            user_data_dir = args.user_data_dir or os.environ.get("PROPS_UNDERDOG_USER_DATA_DIR")
+            if user_data_dir:
+                print(f"Using profile: {user_data_dir}")
+            records = fetch_with_playwright(
+                save_path="underdog_captured.json",
+                user_data_dir=user_data_dir,
+                connect_url=args.connect,
+                headed=args.headed,
+                debug=args.debug,
+            )
+        if records:
+            print(f"Fetched {len(records)} projection records via API.")
+        elif err is None:
+            print("Fetched 0 projection records via API.")
+        elif did_fallback:
+            print("No records after browser fallback (session may be expired). Try --browser --headed to log in, or --input <file.json>.")
+        else:
+            print("No records. Use --browser to capture from the app, or --input <file.json>.")
 
     if not records:
         print("No records to load. Use --input <file.json> with projection data, or check underdog_captured.json for API shape.")
@@ -545,10 +1320,189 @@ def main():
 
     if args.db:
         trusted = getattr(args, "trusted_connection", False) or os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
-        n = insert_underdog_stage(records, server=args.db_server, database=args.database, user=args.db_user, password=args.db_password, trusted_connection=trusted)
-        print(f"Staged {n} rows")
-        m = upsert_underdog_from_stage(server=args.db_server, database=args.database, user=args.db_user, password=args.db_password, trusted_connection=trusted)
+
+        # Insert projections into stage and merge. Use all records (API + fallback), normalized
+        # to full column set so fallback 5-field records don't cause insert failures or get dropped.
+        projections_to_stage = [
+            r if "api_id" in r else _normalize_projection_record_minimal(r)
+            for r in records
+        ]
+        n = insert_underdog_stage(
+            projections_to_stage,
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Staged {n} projection rows")
+        m = upsert_underdog_from_stage(
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
         print(f"Merged {m} rows into underdog_projection")
+
+        # Insert supporting entities into their stage tables if we have them
+        try:
+            from typing import Iterable  # noqa: F401  (only for type checkers)
+        except ImportError:
+            pass
+
+        def _insert_stage_helper(table: str, cols: list[str], rows: list[dict]) -> int:
+            if not rows:
+                return 0
+            import pyodbc
+
+            user = args.db_user or os.environ.get("PROPS_DB_USER", "dbadmin")
+            password = args.db_password or os.environ.get("PROPS_DB_PASSWORD", "")
+            conn = _get_db_conn(args.db_server, args.database, user, password, trusted)
+            placeholders = ", ".join("?" * len(cols))
+            with conn:
+                cursor = conn.cursor()
+                cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+                for r in rows:
+                    cursor.execute(
+                        f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({placeholders})",
+                        [r.get(c) for c in cols],
+                    )
+            conn.close()
+            return len(rows)
+
+        # Players
+        player_cols = [
+            "id",
+            "first_name",
+            "last_name",
+            "position_display_name",
+            "position_id",
+            "position_name",
+            "team_id",
+            "sport_id",
+            "jersey_number",
+            "image_url",
+            "dark_image_url",
+            "light_image_url",
+            "action_path",
+            "country",
+        ]
+        pn = _insert_stage_helper("underdog_player_stage", player_cols, _LAST_UNDERDOG_PLAYERS)
+        if pn:
+            print(f"Staged {pn} player rows into underdog_player_stage")
+
+        # Appearances
+        appearance_cols = [
+            "id",
+            "player_id",
+            "match_id",
+            "match_type",
+            "team_id",
+            "position_id",
+            "lineup_status_id",
+            "sort_by",
+            "multiple_picks_allowed",
+            "type",
+        ]
+        an = _insert_stage_helper("underdog_appearance_stage", appearance_cols, _LAST_UNDERDOG_APPEARANCES)
+        if an:
+            print(f"Staged {an} appearance rows into underdog_appearance_stage")
+
+        # Games
+        game_cols = [
+            "id",
+            "scheduled_at",
+            "home_team_id",
+            "away_team_id",
+            "title",
+            "short_title",
+            "abbreviated_title",
+            "full_team_names_title",
+            "status",
+            "sport_id",
+            "type",
+            "period",
+            "match_progress",
+            "away_team_score",
+            "home_team_score",
+            "rank",
+            "year",
+            "season_type",
+            "updated_at",
+            "rescheduled_from",
+            "title_suffix",
+            "manually_created",
+            "pre_game_data",
+        ]
+        gn = _insert_stage_helper("underdog_game_stage", game_cols, _LAST_UNDERDOG_GAMES)
+        if gn:
+            print(f"Staged {gn} game rows into underdog_game_stage")
+
+        # Solo games
+        solo_cols = [
+            "id",
+            "scheduled_at",
+            "home_player_id",
+            "away_player_id",
+            "title",
+            "short_title",
+            "abbreviated_title",
+            "full_title",
+            "status",
+            "sport_id",
+            "type",
+            "competition_id",
+            "rank",
+            "period",
+            "match_progress",
+            "score",
+            "updated_at",
+            "manually_created",
+            "sport_tournament_round_id",
+            "pre_game_data",
+        ]
+        sn = _insert_stage_helper("underdog_solo_game_stage", solo_cols, _LAST_UNDERDOG_SOLO_GAMES)
+        if sn:
+            print(f"Staged {sn} solo game rows into underdog_solo_game_stage")
+
+        # Merge stage tables into main Underdog tables
+        player_merged = upsert_underdog_player_from_stage(
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Merged {player_merged} rows into underdog_player")
+
+        appearance_merged = upsert_underdog_appearance_from_stage(
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Merged {appearance_merged} rows into underdog_appearance")
+
+        game_merged = upsert_underdog_game_from_stage(
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Merged {game_merged} rows into underdog_game")
+
+        solo_merged = upsert_underdog_solo_game_from_stage(
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Merged {solo_merged} rows into underdog_solo_game")
+
     return 0
 
 
