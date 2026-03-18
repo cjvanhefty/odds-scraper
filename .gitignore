@@ -1,3 +1,16 @@
 # Local env with DB credentials (copy from .env.example)
 .env
 .env.txt
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Scraper captures (local debug artifacts)
+parlayplay_captured.json
+*_captured.json
+*_captured*.json
+
+# Playwright browser profiles (local)
+.playwright-*/
+.playwright/

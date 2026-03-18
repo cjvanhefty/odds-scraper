@@ -1,4 +1,5 @@
 -- Underdog Fantasy projection staging table (mirrors underdog_projection for MERGE).
+-- start_time is America/Chicago local (datetime2).
 USE [Props]
 GO
 
@@ -9,7 +10,7 @@ CREATE TABLE [dbo].[underdog_projection_stage](
 	[display_name] [nvarchar](100) NOT NULL,
 	[stat_type_name] [nvarchar](100) NOT NULL,
 	[line_score] [decimal](10, 2) NULL,
-	[start_time] [datetimeoffset](3) NULL
+	[start_time] [datetime2](3) NULL
 ) ON [PRIMARY]
 END
 GO
