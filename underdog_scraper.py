@@ -12,8 +12,35 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
+
+CHICAGO = ZoneInfo("America/Chicago")
+
+
+def to_chicago_local(ts) -> str | None:
+    """Convert API start_time (epoch ms/s or ISO str) to Chicago local time for datetime2 (no offset)."""
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        utc_sec = ts / 1000 if ts > 1e12 else ts
+        dt = datetime.fromtimestamp(utc_sec, tz=ZoneInfo("UTC")).astimezone(CHICAGO)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    s = str(ts).strip()
+    if not s:
+        return None
+    try:
+        if "T" in s:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt = dt.astimezone(CHICAGO)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
 
 # Map Underdog stat names to PrizePicks stat_type_name for matching
 STAT_NORMALIZE = {
@@ -110,11 +137,10 @@ def parse_records_from_json(data) -> list[dict]:
             except (TypeError, ValueError):
                 line = None
         st = item.get("start_time") or item.get("game_date") or item.get("startTime")
+        st = to_chicago_local(st)
         if st is None:
             continue
-        if isinstance(st, (int, float)):
-            st = datetime.utcfromtimestamp(st / 1000 if st > 1e12 else st).isoformat() + "Z"
-        key = (name, stat, str(st)[:19])
+        key = (name, stat, st)
         if key in seen:
             continue
         seen.add(key)
@@ -154,6 +180,7 @@ def _normalize_projection_record_minimal(r: dict) -> dict:
         "stat_type_name": r.get("stat_type_name"),
         "line_score": r.get("line_score"),
         "start_time": r.get("start_time"),
+        "underdog_player_id": r.get("underdog_player_id"),
         "api_id": None,
         "over_under_id": None,
         "provider_id": None,
@@ -209,6 +236,7 @@ def insert_underdog_stage(
         "stat_type_name",
         "line_score",
         "start_time",
+        "underdog_player_id",
         "api_id",
         "over_under_id",
         "provider_id",
@@ -273,6 +301,7 @@ def upsert_underdog_from_stage(
     history_sql = """
     INSERT INTO [dbo].[underdog_projection_history] (
         projection_id, display_name, stat_type_name, line_score, start_time,
+        underdog_player_id,
         api_id, over_under_id, provider_id, stat_value, line_type, status, rank,
         sort_by, stable_id, expires_at, updated_at, contract_terms_url, contract_url,
         live_event, live_event_stat, non_discounted_stat_value,
@@ -290,6 +319,7 @@ def upsert_underdog_from_stage(
         p.stat_type_name,
         p.line_score,
         p.start_time,
+        p.underdog_player_id,
         p.api_id,
         p.over_under_id,
         p.provider_id,
@@ -342,10 +372,11 @@ def upsert_underdog_from_stage(
     """
 
     move_expired_sql = """
-    DECLARE @nowUtc datetimeoffset(3) = SYSUTCDATETIME();
+    DECLARE @nowChicago datetime2(3) = CONVERT(datetime2(3), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
 
     INSERT INTO [dbo].[underdog_projection_history] (
         projection_id, display_name, stat_type_name, line_score, start_time,
+        underdog_player_id,
         api_id, over_under_id, provider_id, stat_value, line_type, status, rank,
         sort_by, stable_id, expires_at, updated_at, contract_terms_url, contract_url,
         live_event, live_event_stat, non_discounted_stat_value,
@@ -363,6 +394,7 @@ def upsert_underdog_from_stage(
         p.stat_type_name,
         p.line_score,
         p.start_time,
+        p.underdog_player_id,
         p.api_id,
         p.over_under_id,
         p.provider_id,
@@ -396,11 +428,11 @@ def upsert_underdog_from_stage(
         p.pickem_stat_id,
         p.appearance_stat_rank,
         p.options,
-        @nowUtc AS created_at,
+        @nowChicago AS created_at,
         p.last_modified_at
     FROM [dbo].[underdog_projection] p
     WHERE p.start_time IS NOT NULL
-      AND p.start_time < @nowUtc
+      AND p.start_time < @nowChicago
       AND NOT EXISTS (
           SELECT 1
           FROM [dbo].[underdog_projection_history] h
@@ -410,7 +442,7 @@ def upsert_underdog_from_stage(
 
     DELETE FROM [dbo].[underdog_projection]
     WHERE start_time IS NOT NULL
-      AND start_time < @nowUtc;
+      AND start_time < @nowChicago;
     """
 
     merge_sql = """
@@ -426,6 +458,7 @@ def upsert_underdog_from_stage(
         stat_type_name = s.stat_type_name,
         line_score = s.line_score,
         start_time = s.start_time,
+        underdog_player_id = s.underdog_player_id,
         api_id = s.api_id,
         over_under_id = s.over_under_id,
         provider_id = s.provider_id,
@@ -463,6 +496,7 @@ def upsert_underdog_from_stage(
     WHEN NOT MATCHED BY TARGET
       THEN INSERT (
         projection_id, display_name, stat_type_name, line_score, start_time,
+        underdog_player_id,
         api_id, over_under_id, provider_id, stat_value, line_type,
         status, rank, sort_by, stable_id, expires_at, updated_at,
         contract_terms_url, contract_url, live_event, live_event_stat,
@@ -474,6 +508,7 @@ def upsert_underdog_from_stage(
       )
       VALUES (
         s.projection_id, s.display_name, s.stat_type_name, s.line_score, s.start_time,
+        s.underdog_player_id,
         s.api_id, s.over_under_id, s.provider_id, s.stat_value, s.line_type,
         s.status, s.rank, s.sort_by, s.stable_id, s.expires_at, s.updated_at,
         s.contract_terms_url, s.contract_url, s.live_event, s.live_event_stat,
@@ -482,7 +517,8 @@ def upsert_underdog_from_stage(
         s.ou_prediction_market, s.ou_scoring_type_id, s.ou_team_divider,
         s.appearance_stat_id, s.appearance_id, s.display_stat, s.stat, s.graded_by,
         s.pickem_stat_id, s.appearance_stat_rank, s.options, GETUTCDATE()
-      );
+      )
+    ;
     """
 
     with conn:
@@ -852,17 +888,12 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
         gid = a.get("game_id") or a.get("match_id")
         if gid is not None and gid not in games:
             gid = str(gid)
-        start_time = None
+        start_time = ""
         if gid is not None and gid in games:
             g = games.get(gid)
             st = (g or {}).get("start_time") or (g or {}).get("starts_at") or (g or {}).get("scheduled_at")
             if st is not None:
-                if isinstance(st, (int, float)):
-                    start_time = datetime.utcfromtimestamp(st / 1000 if st > 1e12 else st).isoformat() + "Z"
-                else:
-                    start_time = str(st)[:19]
-        if start_time is None:
-            start_time = ""
+                start_time = to_chicago_local(st) or ""
         name = ""
         if pid and pid in players:
             p = players[pid]
@@ -870,7 +901,7 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
             last = (p.get("last_name") or "").strip()
             name = f"{first} {last}".strip() or (p.get("full_name") or p.get("display_name") or "")
         if aid is not None:
-            appearance_info[aid] = (name, start_time)
+            appearance_info[aid] = (name, start_time, pid)
             if aid not in _SEEN_UNDERDOG_APPEARANCE_IDS:
                 _SEEN_UNDERDOG_APPEARANCE_IDS.add(aid)
                 _LAST_UNDERDOG_APPEARANCES.append(
@@ -964,7 +995,13 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
         stat = _normalize_stat(stat) or stat
         if not stat:
             stat = "Unknown"
-        name, start_time = appearance_info.get(aid, ("", ""))
+        info = appearance_info.get(aid) or ("", "", None)
+        name = info[0] if len(info) > 0 else ""
+        start_time = info[1] if len(info) > 1 else ""
+        # API gives appearance.player_id (Underdog GUID). We do not store it on projection; join uses
+        # underdog_projection.appearance_id -> underdog_appearance -> underdog_player.id, then
+        # underdog_player.underdog_player_id = [player].underdog_player_id (internal id).
+        underdog_player_id = None
         # Line can be on the over_under_line (stat_value) or on each option (line/line_score)
         default_line = oul.get("stat_value")
         if default_line is not None:
@@ -1014,7 +1051,8 @@ def parse_underdog_over_under_api(pickem_data: dict) -> list[dict]:
                 "display_name": (name or "")[:100],
                 "stat_type_name": stat[:100],
                 "line_score": line,
-                "start_time": start_time or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "start_time": start_time or datetime.now(CHICAGO).strftime("%Y-%m-%d %H:%M:%S"),
+                "underdog_player_id": underdog_player_id,
                 # Expanded over_under_lines fields
                 "api_id": oul.get("id"),
                 "over_under_id": oul.get("over_under_id"),

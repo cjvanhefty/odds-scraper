@@ -139,13 +139,6 @@
   </div>
 
   <div class="controls">
-    <label>
-      Streak (games):
-      <select id="streakGames">
-        <option value="3">3</option>
-        <option value="5" selected>5</option>
-      </select>
-    </label>
     <button type="button" class="btn" id="btnRefresh">Refresh list</button>
   </div>
 
@@ -214,7 +207,8 @@
           <div class="chart-legend" id="chartLegend"></div>
         </div>
         <div id="modalStatDetail" class="stat-detail" style="display: none;">
-          <h3>Odds types</h3>
+          <h3>Lines by site</h3>
+          <p id="modalAvailableOn" class="modal-available-on" style="font-size: 0.85rem; color: var(--muted); margin: 0 0 0.5rem 0;"></p>
           <div class="odds-types" id="modalOddsTypes"></div>
         </div>
       </div>
@@ -312,11 +306,11 @@
     let currentPage = 1;
 
     function getParams() {
-      const streak = parseInt(document.getElementById('streakGames').value, 10) || 5;
       const params = new URLSearchParams();
       params.set('full_list', 'true');
       params.set('page_size', '0');
-      params.set('streak_games', String(streak));
+      var leagueIds = getSelectedLeagueIds();
+      if (leagueIds && leagueIds.length > 0) params.set('league_ids', leagueIds.join(','));
       return params;
     }
 
@@ -432,7 +426,7 @@
       const pageRows = filtered.slice(start, start + pageSize);
       body.innerHTML = pageRows.map(function (r) {
         const risk = r.risk ? '<span class="badge ' + (r.risk === 'Low' ? 'low' : r.risk === 'Medium' ? 'medium' : 'high') + '">' + r.risk + '</span>' : '—';
-        const favored = r.favored ? '<span class="favored">' + (r.streak_games || 5) + '/' + (r.streak_games || 5) + ' over</span>' : '—';
+        const favored = r.favored ? '<span class="favored">5/5 over</span>' : '—';
         const startTime = r.start_time ? new Date(r.start_time).toLocaleString() : '—';
         const linePP = r.line_score != null ? Number(r.line_score) : '—';
         const lineUD = r.line_underdog != null ? Number(r.line_underdog) : '—';
@@ -461,7 +455,6 @@
       const wrap = document.getElementById('tableWrap');
       const status = document.getElementById('tableStatus');
       const table = document.getElementById('projectionsTable');
-      const body = document.getElementById('projectionsBody');
       wrap.classList.add('loading');
       status.textContent = 'Loading...';
       table.style.display = 'none';
@@ -482,8 +475,11 @@
         renderSportFilters();
         updateMainStatList();
         renderTableFromCurrent();
-        var streakGames = parseInt(document.getElementById('streakGames').value, 10) || 5;
-        fetch(API + '/api/projections/last-five?streak_games=' + streakGames)
+        status.textContent = '';
+        wrap.classList.remove('loading');
+        table.style.display = 'table';
+        var lastFiveQs = getSelectedLeagueIds().length ? '?league_ids=' + getSelectedLeagueIds().join(',') : '';
+        fetch(API + '/api/projections/last-five' + lastFiveQs)
           .then(function (r) { return r.ok ? r.json() : []; })
           .then(function (lastFiveList) {
             if (!Array.isArray(lastFiveList)) return;
@@ -495,7 +491,6 @@
             lastFiveByKey = byKey;
             if (!Array.isArray(currentProjections)) return;
             currentProjections.forEach(function (r) {
-              if (r.league_id != null && String(r.league_id) !== '7') return;
               var name = (r.display_name || r.pp_name || '').trim();
               var stat = (r.stat_type_name || '').trim();
               var key = name + '\n' + stat;
@@ -516,11 +511,11 @@
           .catch(function () {});
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
+        wrap.classList.remove('loading');
       }
-      wrap.classList.remove('loading');
     }
 
-    var modalState = { playerName: null, streakGames: null, list: null, byStat: null, stats: null, streakLoading: false, abortController: null };
+    var modalState = { playerName: null, list: null, byStat: null, stats: null, streakLoading: false, abortController: null };
 
     function mergeStreakFromGridIntoModalList(modalList) {
       if (!Array.isArray(modalList)) return false;
@@ -581,10 +576,8 @@
       status.textContent = 'Loading...';
       modal.classList.add('open');
 
-      var streakGames = parseInt(document.getElementById('streakGames').value, 10) || 5;
       if (modalState.abortController) modalState.abortController.abort();
       modalState.playerName = playerName;
-      modalState.streakGames = streakGames;
       modalState.streakLoading = true;
       modalState.abortController = new AbortController();
       var streakSignal = modalState.abortController.signal;
@@ -676,13 +669,10 @@
         }
 
         if (!haveStreakFromGrid) {
-          var streakParams = new URLSearchParams();
-          streakParams.set('player_name', playerName);
-          streakParams.set('streak_games', String(streakGames));
-          fetch(API + '/api/projections/streak?' + streakParams.toString(), { signal: streakSignal })
+          fetch(API + '/api/projections/streak?player_name=' + encodeURIComponent(playerName), { signal: streakSignal })
             .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error(r.statusText)); })
             .then(function (streakList) {
-              if (!modal.classList.contains('open') || modalState.playerName !== playerName || modalState.streakGames !== streakGames) return;
+              if (!modal.classList.contains('open') || modalState.playerName !== playerName) return;
               var byId = {};
               (modalState.list || []).forEach(function (r, idx) { byId[r.projection_id] = r; });
               streakList.forEach(function (s) {
@@ -790,8 +780,7 @@
       });
       var first = rowsByLine[0];
       var statName = first.stat_type_name || '';
-      var n = first.streak_games != null ? first.streak_games : 5;
-      document.getElementById('chartStatName').textContent = statName + ' — last ' + n + ' games';
+      document.getElementById('chartStatName').textContent = statName + ' — last 5 games';
 
       var values = first.last_n_values || [];
       var dates = first.last_n_dates || [];
@@ -808,9 +797,20 @@
         var line = r.line_score != null ? Number(r.line_score) : '';
         var tagLine = r.line_score != null ? Number(r.line_score) : '';
         var isSelected = (idx === 0) || (tagLine === primaryLine && primaryLine != null);
-        return '<span class="odds-tag' + (isSelected ? ' selected' : '') + '" data-line="' + tagLine + '" data-odds="' + escapeHtml(r.odds_type || 'standard') + '">' + escapeHtml(r.odds_type || 'standard') + ': ' + line + '</span>';
+        return '<span class="odds-tag' + (isSelected ? ' selected' : '') + '" data-line="' + tagLine + '" data-odds="' + escapeHtml(r.odds_type || 'standard') + '">PrizePicks ' + escapeHtml(r.odds_type || 'standard') + ': ' + line + '</span>';
       }).join('');
+      var lineUD = first.line_underdog != null ? Number(first.line_underdog) : null;
+      var linePP = first.line_parlay_play != null ? Number(first.line_parlay_play) : null;
+      if (lineUD != null && !isNaN(lineUD)) oddsHtml += '<span class="odds-tag" data-line="' + lineUD + '">Underdog: ' + lineUD + '</span>';
+      if (linePP != null && !isNaN(linePP)) oddsHtml += '<span class="odds-tag" data-line="' + linePP + '">Parlay Play: ' + linePP + '</span>';
       document.getElementById('modalOddsTypes').innerHTML = oddsHtml;
+
+      var availableSites = [];
+      if (rowsByLine.some(function (r) { return r.line_score != null; })) availableSites.push('PrizePicks');
+      if (lineUD != null && !isNaN(lineUD)) availableSites.push('Underdog');
+      if (linePP != null && !isNaN(linePP)) availableSites.push('Parlay Play');
+      var availableEl = document.getElementById('modalAvailableOn');
+      if (availableEl) availableEl.textContent = availableSites.length ? 'Available on: ' + availableSites.join(', ') : 'Available on: —';
 
       if (values.length === 0) {
         var msg = (typeof modalState !== 'undefined' && modalState.streakLoading)
@@ -932,7 +932,8 @@
         var res = await fetch(API + '/api/update/parlayplay-projections', { method: 'POST' });
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok) throw new Error(data.detail || res.statusText);
-        showUpdateMessage('Parlay Play updated. ' + (data.log || '').slice(0, 200), false);
+        var msg = (data.message || 'Parlay Play updated.') + (data.log ? ' ' + (data.log + '').slice(0, 180) : '');
+        showUpdateMessage(msg, false);
         loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
@@ -986,7 +987,6 @@
     }
 
     document.getElementById('btnRefresh').addEventListener('click', loadProjections);
-    document.getElementById('streakGames').addEventListener('change', function () { currentPage = 1; loadProjections(); });
     document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; renderTableFromCurrent(); });
     document.getElementById('sportFilters').addEventListener('click', function (e) {
       var btn = e.target && e.target.closest && e.target.closest('.filter-btn');

@@ -60,32 +60,6 @@ def _json_safe(val):
     return val
 
 
-def get_underdog_lines_by_match(conn) -> dict:
-    """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks."""
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            SELECT display_name, stat_type_name,
-                   CONVERT(varchar(10), start_time, 120) AS game_date,
-                   line_score
-            FROM [dbo].[underdog_projection]
-            WHERE display_name IS NOT NULL AND stat_type_name IS NOT NULL
-        """)
-        key_to_line = {}
-        for row in cursor.fetchall():
-            name = (row[0] or "").strip()
-            stat = (row[1] or "").strip()
-            date_part = (row[2] or "")[:10]
-            line = float(row[3]) if row[3] is not None else None
-            if name and stat and date_part:
-                key_to_line[(name, stat, date_part)] = line
-        return key_to_line
-    except Exception:
-        return {}
-    finally:
-        cursor.close()
-
-
 def get_parlay_play_lines_by_match(conn) -> dict:
     """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks."""
     cursor = conn.cursor()
@@ -96,6 +70,7 @@ def get_parlay_play_lines_by_match(conn) -> dict:
                    line_score
             FROM [dbo].[parlay_play_projection]
             WHERE display_name IS NOT NULL AND stat_type_name IS NOT NULL
+              AND is_main_line = 1
         """)
         key_to_line = {}
         for row in cursor.fetchall():
@@ -168,12 +143,14 @@ def get_projections_count(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+STREAK_GAMES = 5
+
+
 @app.get("/api/projections/streak")
 def get_projections_streak(
     player_name: str = Query(..., description="Player display name (e.g. for modal lazy-load)"),
-    streak_games: int = Query(5, ge=1, le=20, description="Number of games for last-N stats"),
 ):
-    """Return streak enrichment only for one player. Frontend merges by projection_id for lazy-load modal."""
+    """Return streak enrichment (last 5 games) for one player. Frontend merges by projection_id for lazy-load modal."""
     conn = None
     try:
         conn = get_conn()
@@ -190,7 +167,7 @@ def get_projections_streak(
         if not projections:
             return []
         name_to_nba_id = resolve_nba_player_ids(conn, use_api_fallback=USE_NBA_API_FALLBACK)
-        projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, streak_games)
+        projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, STREAK_GAMES)
         out = []
         for r in projections:
             out.append({
@@ -204,7 +181,7 @@ def get_projections_streak(
                 "last_n_dates": r.get("last_n_dates") or [],
                 "last_n_opponents": r.get("last_n_opponents") or [],
                 "last_n_projection_lines": _json_safe(r.get("last_n_projection_lines") or []),
-                "streak_games": _json_safe(r.get("streak_games") or streak_games),
+                "streak_games": STREAK_GAMES,
             })
         return out
     except Exception as e:
@@ -218,7 +195,6 @@ def get_projections_streak(
 @app.get("/api/projections")
 def list_projections(
     stat_type: str | None = Query(None, description="Filter by stat type (e.g. Points, Rebounds)"),
-    streak_games: int = Query(5, ge=1, le=20, description="Number of games for over-streak / risk"),
     league_id: int = Query(7, description="PrizePicks league_id (7 = NBA). Ignored if league_ids is set."),
     league_ids: str | None = Query(None, description="Comma-separated PrizePicks league_ids (e.g. 7,9,82 for NBA, NFL, Soccer)"),
     include_all_odds: bool = Query(False, description="Include all odds types (standard, demon, goblin) for modals"),
@@ -258,7 +234,7 @@ def list_projections(
                     PLAYER_MAPPING_WARNING,
                 )
                 streak_mapping_unavailable = True
-            projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, streak_games)
+            projections = enrich_projections_with_streak(conn, projections, name_to_nba_id, STREAK_GAMES)
         elif player_name and player_name.strip() and skip_streak:
             projections = [
                 {
@@ -270,7 +246,7 @@ def list_projections(
                     "last_n_dates": [],
                     "last_n_opponents": [],
                     "last_n_projection_lines": [],
-                    "streak_games": streak_games,
+                    "streak_games": STREAK_GAMES,
                 }
                 for p in projections
             ]
@@ -285,11 +261,10 @@ def list_projections(
                     "last_n_dates": [],
                     "last_n_opponents": [],
                     "last_n_projection_lines": [],
-                    "streak_games": streak_games,
+                    "streak_games": STREAK_GAMES,
                 }
                 for p in projections
             ]
-        underdog_map = get_underdog_lines_by_match(conn)
         parlay_play_map = get_parlay_play_lines_by_match(conn)
         out = []
         for r in projections:
@@ -300,12 +275,12 @@ def list_projections(
                     row[k] = float(v) if v is not None else None
                 else:
                     row[k] = v
+            # line_underdog comes from get_projections (join via [player].underdog_player_id)
             display_name = (r.get("display_name") or r.get("pp_name") or "").strip()
             stat_type_name = (r.get("stat_type_name") or "").strip()
             start_time = r.get("start_time")
             game_date = (str(start_time)[:10] if start_time else "") or ""
             key = (display_name, stat_type_name, game_date)
-            row["line_underdog"] = underdog_map.get(key)
             row["line_parlay_play"] = parlay_play_map.get(key)
             # Opponent and H/A from prizepicks_game when available
             home_abbrev = (r.get("home_abbreviation") or "").strip()
@@ -367,15 +342,19 @@ def list_projections(
 
 @app.get("/api/projections/last-five")
 def get_last_five_batch(
-    streak_games: int = Query(5, ge=1, le=20, description="Number of games for last-N stats"),
+    league_id: int = Query(7, description="League id (7=NBA). Ignored if league_ids set."),
+    league_ids: str | None = Query(None, description="Comma-separated league_ids (e.g. 7 for NBA)."),
 ):
-    """Return last N game stats for every NBA (player, stat) that has a projection. Ignores odds_type so all stats (standard, demon, goblin) are included. Client merges by (display_name, stat_type_name)."""
+    """Return last 5 game stats for every (player, stat) in the given league(s). Client merges by (display_name, stat_type_name)."""
     conn = None
     try:
         conn = get_conn()
+        league_id_list = _parse_league_ids(league_id, league_ids)
+        if not league_id_list:
+            return []
         projections = get_projections(
             conn,
-            league_id=7,
+            league_id=league_id_list,
             odds_type=None,
             active_only=True,
         )
@@ -388,7 +367,7 @@ def get_last_five_batch(
                 PLAYER_MAPPING_WARNING,
             )
         enriched = enrich_projections_with_streak(
-            conn, projections, name_to_nba_id, streak_games
+            conn, projections, name_to_nba_id, STREAK_GAMES
         )
         out = []
         seen_key: set[tuple[str, str]] = set()
@@ -410,7 +389,7 @@ def get_last_five_batch(
                 "last_n_dates": r.get("last_n_dates") or [],
                 "last_n_opponents": r.get("last_n_opponents") or [],
                 "last_n_projection_lines": _json_safe(r.get("last_n_projection_lines") or []),
-                "streak_games": _json_safe(r.get("streak_games") or 5),
+                "streak_games": STREAK_GAMES,
             })
         headers = {"X-Projections-Warning": PLAYER_MAPPING_WARNING} if not name_to_nba_id else {}
         return JSONResponse(content=out, headers=headers)
@@ -551,38 +530,62 @@ class NbaStatsUpdateBody(BaseModel):
 
 @app.post("/api/update/parlayplay-projections")
 def update_parlayplay_projections():
-    """Run parlayplay_scraper.py --browser --db or with --input."""
-    env = os.environ.copy()
-    server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
-    user = env.get("PROPS_DB_USER", "dbadmin")
-    password = env.get("PROPS_DB_PASSWORD", "")
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "parlayplay_scraper.py"),
-        "--browser",
+    """Run parlayplay_scraper in-process (avoids debugger subprocess issues). Same behavior as CLI --db.
+    Set PROPS_PARLAYPLAY_USE_BROWSER=1 to force browser; PROPS_PARLAYPLAY_USER_DATA_DIR for saved login."""
+    server = os.environ.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
+    user = os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = os.environ.get("PROPS_DB_PASSWORD", "")
+    trusted = os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
+    use_browser = os.environ.get("PROPS_PARLAYPLAY_USE_BROWSER", "").strip().lower() in ("1", "true", "yes")
+    user_data_dir = os.environ.get("PROPS_PARLAYPLAY_USER_DATA_DIR", "").strip()
+    connect_url = os.environ.get("PROPS_BROWSER_CDP", "").strip()
+    argv = [
+        "parlayplay_scraper.py",
         "--db",
         "--db-server", server,
         "--db-user", user,
         "--db-password", password,
     ]
+    if trusted:
+        argv.append("--trusted-connection")
+    if use_browser:
+        argv.append("--browser")
+    if user_data_dir:
+        argv.extend(["--user-data-dir", user_data_dir])
+    if connect_url:
+        argv.extend(["--connect", connect_url])
+    from io import StringIO
+    old_argv = sys.argv
+    old_stdout = sys.stdout
+    sys.argv = argv
+    sys.stdout = StringIO()
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Scraper exited {result.returncode}: {result.stderr or result.stdout}",
-            )
-        return {"ok": True, "message": "Parlay Play projections updated", "log": result.stdout}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Update timed out")
+        import parlayplay_scraper
+        exit_code = parlayplay_scraper.main()
+        out = sys.stdout.getvalue()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        out = sys.stdout.getvalue()
+        detail = str(e)[:400]
+        if out:
+            detail += " Log: " + (out.strip()[-400:] if len(out) > 400 else out.strip())
+        raise HTTPException(status_code=500, detail=detail[:500])
+    finally:
+        sys.argv = old_argv
+        sys.stdout = old_stdout
+    if exit_code != 0:
+        if "Login failed for user" in out or "18456" in out:
+            detail = (
+                "Database login failed. Use same credentials as other scrapers: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
+                "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Original error: " + out[:400]
+            )
+        else:
+            detail = f"Scraper exited {exit_code}: {(out or '')[:500]}"
+        raise HTTPException(status_code=502, detail=detail)
+    if "Fetched 0 projection records" in out and "via API" in out:
+        return {"ok": True, "message": "Parlay Play projections updated (0 lines).", "log": out}
+    if "No records after browser fallback" in out:
+        return {"ok": True, "message": "Parlay Play: 0 records after browser fallback (session may be expired). Run from CLI with --browser --headed to log in.", "log": out}
+    return {"ok": True, "message": "Parlay Play projections updated", "log": out}
 
 
 @app.post("/api/update/underdog-projections")
