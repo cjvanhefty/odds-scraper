@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 # Cache for resolve_nba_player_ids: (use_api_fallback, season) -> name -> nba_id dict. Invalidated on process restart.
 _nba_id_cache: dict[tuple[bool, str], dict[str, int]] = {}
 
+# Cache for materialized last-n table: True if [dbo].[player_stat_last_n] exists, False otherwise, None = not checked yet.
+_player_stat_last_n_exists: bool | None = None
+
 # PrizePicks stat_type_name -> player_stat column name(s). Single str = one column; tuple = sum of columns.
 STAT_COLUMN_MAP = {
     "Points": "pts",
@@ -173,10 +176,29 @@ def get_projections(
             pp.image_url,
             pp.nba_player_id,
             g.away_abbreviation,
-            g.home_abbreviation
+            g.home_abbreviation,
+            COALESCE(ud.line_score, ud_fb.line_score) AS line_underdog
         FROM [dbo].[prizepicks_projection] p
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
+        LEFT JOIN [dbo].[player] pl
+            ON pl.prizepicks_player_id = TRY_CAST(p.player_id AS BIGINT)
+        OUTER APPLY (
+            SELECT TOP 1 ud0.line_score
+            FROM [dbo].[underdog_projection] ud0
+            INNER JOIN [dbo].[underdog_appearance] ua ON ua.id = ud0.appearance_id
+            INNER JOIN [dbo].[underdog_player] up ON up.id = ua.player_id
+            WHERE up.underdog_player_id = pl.underdog_player_id
+              AND ud0.stat_type_name = p.stat_type_name
+              AND CONVERT(date, ud0.start_time) = CONVERT(date, p.start_time)
+        ) ud
+        OUTER APPLY (
+            SELECT TOP 1 ud1.line_score
+            FROM [dbo].[underdog_projection] ud1
+            WHERE LTRIM(RTRIM(ud1.display_name)) = LTRIM(RTRIM(pp.display_name))
+              AND ud1.stat_type_name = p.stat_type_name
+              AND CONVERT(date, ud1.start_time) = CONVERT(date, p.start_time)
+        ) ud_fb
         LEFT JOIN [dbo].[prizepicks_game] g
             ON g.game_id = CAST(p.game_id AS NVARCHAR(20))
         WHERE {where_sql}
@@ -302,17 +324,105 @@ def get_last_n_games_all_stats(
     """Fetch last n games for a player with all stat columns. Returns list of dicts with game_date, matchup, and stat keys."""
     if n < 1:
         return []
+    result = get_last_n_games_all_stats_batch(conn, [nba_player_id], n)
+    return result.get(nba_player_id, [])
+
+
+def _get_last_n_games_from_materialized(
+    conn, nba_player_ids: list[int], n: int
+) -> dict[int, list[dict]] | None:
+    """Read from [dbo].[player_stat_last_n] if it exists. Returns same shape as get_last_n_games_all_stats_batch, or None to fall back."""
+    global _player_stat_last_n_exists
+    if n < 1 or not nba_player_ids:
+        return {} if n >= 1 else None
+    ids = list(dict.fromkeys(i for i in nba_player_ids if i is not None))
+    if not ids:
+        return {}
+    if _player_stat_last_n_exists is None:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'player_stat_last_n'"
+            )
+            _player_stat_last_n_exists = cursor.fetchone() is not None
+        except Exception:
+            _player_stat_last_n_exists = False
+    if not _player_stat_last_n_exists:
+        return None
     cols = ", ".join(f"[{c}]" for c in _PLAYER_STAT_COLUMNS)
+    placeholders = ",".join("?" * len(ids))
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"""
+            SELECT player_id, game_date, matchup, {cols}
+            FROM [dbo].[player_stat_last_n]
+            WHERE player_id IN ({placeholders}) AND rn <= ?
+            ORDER BY player_id, rn
+            """,
+            (*ids, n),
+        )
+    except Exception:
+        return None
+    columns = [c[0] for c in cursor.description]
+    out: dict[int, list[dict]] = {i: [] for i in ids}
+    for row in cursor.fetchall():
+        d = dict(zip(columns, row))
+        pid = d.pop("player_id", None)
+        if pid is not None:
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                pass
+            if pid in out:
+                out[pid].append(d)
+    for pid in out:
+        out[pid].sort(key=lambda r: (r.get("game_date") or ""), reverse=True)
+    return out
+
+
+def get_last_n_games_all_stats_batch(
+    conn, nba_player_ids: list[int], n: int = 5
+) -> dict[int, list[dict]]:
+    """Fetch last n games for many players in one query. Uses [dbo].[player_stat_last_n] if present, else live ROW_NUMBER() over player_stat."""
+    if n < 1 or not nba_player_ids:
+        return {}
+    ids = list(dict.fromkeys(i for i in nba_player_ids if i is not None))
+    if not ids:
+        return {}
+    result = _get_last_n_games_from_materialized(conn, ids, n)
+    if result is not None:
+        return result
+    cols = ", ".join(f"[{c}]" for c in _PLAYER_STAT_COLUMNS)
+    placeholders = ",".join("?" * len(ids))
     sql = f"""
-    SELECT TOP (?) CAST(game_date AS VARCHAR(20)) AS game_date, ISNULL(matchup, '') AS matchup, {cols}
-    FROM [dbo].[player_stat]
-    WHERE player_id = ?
-    ORDER BY game_date DESC
+    WITH ranked AS (
+        SELECT player_id, CAST(game_date AS VARCHAR(20)) AS game_date, ISNULL(matchup, '') AS matchup, {cols},
+               ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_date DESC) AS rn
+        FROM [dbo].[player_stat]
+        WHERE player_id IN ({placeholders})
+    )
+    SELECT player_id, game_date, matchup, {cols}
+    FROM ranked
+    WHERE rn <= ?
     """
     cursor = conn.cursor()
-    cursor.execute(sql, (n, nba_player_id))
+    cursor.execute(sql, (*ids, n))
     columns = [c[0] for c in cursor.description]
-    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    out = {i: [] for i in ids}
+    for row in cursor.fetchall():
+        d = dict(zip(columns, row))
+        pid = d.pop("player_id", None)
+        if pid is not None:
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                pass
+            if pid in out:
+                out[pid].append(d)
+    for pid in out:
+        out[pid].sort(key=lambda r: (r.get("game_date") or ""), reverse=True)
+    return out
 
 
 def _stat_value_from_row(
@@ -603,15 +713,16 @@ def enrich_projections_with_streak(
 
     # (pp_player_id, stat_type, date) -> line_score for historical lookup (keys per player so no collision)
     hist_batch_cache: dict[tuple[str, str, str], float] = {}
-    # Batch fetch: for each nba_id that appears, get last N games (all stats) and historical lines
+    # Batch fetch last N games for all players in one query
     nba_ids_to_fetch = {m[1] for m in proj_meta if m[1] is not None}
+    try:
+        batch_result = get_last_n_games_all_stats_batch(conn, list(nba_ids_to_fetch), streak_games)
+        nba_id_to_batch_rows.update(batch_result)
+    except Exception:
+        pass
+    # Collect dates and pp_player_ids per nba_id, then batch fetch historical lines
     for nba_id in nba_ids_to_fetch:
-        try:
-            batch_rows = get_last_n_games_all_stats(conn, nba_id, streak_games)
-        except Exception:
-            batch_rows = []
-        nba_id_to_batch_rows[nba_id] = batch_rows
-        # Collect (pp_player_id, stat_type_names, dates) for this nba_id's projections
+        batch_rows = nba_id_to_batch_rows.get(nba_id, [])
         pp_player_ids: dict[str, set[str]] = {}
         dates_for_hist: set[str] = set()
         for (row, pid, stat_type, pp_pid, stat_col) in proj_meta:
@@ -624,7 +735,6 @@ def enrich_projections_with_streak(
             )
             if pp_pid:
                 pp_player_ids.setdefault(pp_pid, set()).add(stat_type)
-        # One historical query per pp_player_id; cache by (pp_player_id, stat_type, date)
         for pp_pid, stat_types in pp_player_ids.items():
             try:
                 hist_map = get_historical_projection_lines_batch(
