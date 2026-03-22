@@ -60,13 +60,27 @@ def _json_safe(val):
     return val
 
 
+def _normalize_join_stat(stat_type_name: str | None) -> str:
+    """Normalize stat names for cross-provider joins (UI keys), without changing what we display."""
+    s = (stat_type_name or "").strip()
+    if s in ("Blocks", "Blocked Shots"):
+        return "Blocks__Blocked_Shots"
+    if s in ("Double Doubles", "Double-Doubles"):
+        return "Double_Doubles"
+    if s.startswith("Blks+Stls"):
+        return "Blks_Stls"
+    if s in ("3 Pointers", "3 Pointers Made"):
+        return "FG3M"
+    return s
+
+
 def get_parlay_play_lines_by_match(conn) -> dict:
     """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks."""
     cursor = conn.cursor()
     try:
         cursor.execute("""
             SELECT display_name, stat_type_name,
-                   CONVERT(varchar(10), start_time, 120) AS game_date,
+                   CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
                    line_score
             FROM [dbo].[parlay_play_projection]
             WHERE display_name IS NOT NULL AND stat_type_name IS NOT NULL
@@ -75,7 +89,7 @@ def get_parlay_play_lines_by_match(conn) -> dict:
         key_to_line = {}
         for row in cursor.fetchall():
             name = (row[0] or "").strip()
-            stat = (row[1] or "").strip()
+            stat = _normalize_join_stat((row[1] or "").strip())
             date_part = (row[2] or "")[:10]
             line = float(row[3]) if row[3] is not None else None
             if name and stat and date_part:
@@ -277,7 +291,7 @@ def list_projections(
                     row[k] = v
             # line_underdog comes from get_projections (join via [player].underdog_player_id)
             display_name = (r.get("display_name") or r.get("pp_name") or "").strip()
-            stat_type_name = (r.get("stat_type_name") or "").strip()
+            stat_type_name = _normalize_join_stat((r.get("stat_type_name") or "").strip())
             start_time = r.get("start_time")
             game_date = (str(start_time)[:10] if start_time else "") or ""
             key = (display_name, stat_type_name, game_date)
