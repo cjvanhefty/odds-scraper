@@ -54,15 +54,24 @@ STAT_NORMALIZE = {
     "steals": "Steals",
     "blk": "Blocks",
     "blocks": "Blocks",
+    "blockedshots": "Blocked Shots",
     "tov": "Turnovers",
     "turnovers": "Turnovers",
     "3pm": "3 Pointers Made",
     "3pmade": "3 Pointers Made",
+    "3pointersmade": "3 Pointers Made",  # Underdog uses "3-Pointers Made"
     "threes": "3 Pointers Made",
     "3pt": "3 Pointers",
     "3ptm": "3 Pointers Made",
     "oreb": "Offensive Rebounds",
     "dreb": "Defensive Rebounds",
+    # Common Underdog display_stat spellings for combos
+    "ptsrebsasts": "Pts+Rebs+Asts",         # "Pts + Rebs + Asts"
+    "pointsreboundsassists": "Pts+Rebs+Asts",
+    "pointsrebounds": "Pts+Rebs",           # "Points + Rebounds"
+    "pointsassists": "Pts+Asts",            # "Points + Assists"
+    "reboundsassists": "Rebs+Asts",         # "Rebounds + Assists"
+    "blockssteals": "Blks+Stls",            # "Blocks + Steals"
 }
 
 
@@ -445,6 +454,198 @@ def upsert_underdog_from_stage(
       AND start_time < @nowChicago;
     """
 
+    # Move projections that disappeared from the latest JSON response (i.e. missing from stage).
+    # Stage is rebuilt each run (TRUNCATE + INSERT), so this implements your "only keep latest in projections" rule.
+    move_missing_from_stage_sql = """
+    IF EXISTS (SELECT 1 FROM [dbo].[underdog_projection_stage])
+    BEGIN
+        INSERT INTO [dbo].[underdog_projection_history] (
+            projection_id, display_name, stat_type_name, line_score, start_time,
+            underdog_player_id,
+            api_id, over_under_id, provider_id, stat_value, line_type, status, rank,
+            sort_by, stable_id, expires_at, updated_at, contract_terms_url, contract_url,
+            live_event, live_event_stat, non_discounted_stat_value,
+            ou_title, ou_category, ou_display_mode, ou_grid_display_title,
+            ou_has_alternates, ou_option_priority, ou_prediction_market,
+            ou_scoring_type_id, ou_team_divider,
+            appearance_stat_id, appearance_id, display_stat, stat, graded_by,
+            pickem_stat_id, appearance_stat_rank,
+            options,
+            created_at, last_modified_at
+        )
+        SELECT
+            p.projection_id,
+            p.display_name,
+            p.stat_type_name,
+            p.line_score,
+            p.start_time,
+            p.underdog_player_id,
+            p.api_id,
+            p.over_under_id,
+            p.provider_id,
+            p.stat_value,
+            p.line_type,
+            p.status,
+            p.rank,
+            p.sort_by,
+            p.stable_id,
+            p.expires_at,
+            p.updated_at,
+            p.contract_terms_url,
+            p.contract_url,
+            p.live_event,
+            p.live_event_stat,
+            p.non_discounted_stat_value,
+            p.ou_title,
+            p.ou_category,
+            p.ou_display_mode,
+            p.ou_grid_display_title,
+            p.ou_has_alternates,
+            p.ou_option_priority,
+            p.ou_prediction_market,
+            p.ou_scoring_type_id,
+            p.ou_team_divider,
+            p.appearance_stat_id,
+            p.appearance_id,
+            p.display_stat,
+            p.stat,
+            p.graded_by,
+            p.pickem_stat_id,
+            p.appearance_stat_rank,
+            p.options,
+            SYSUTCDATETIME() AS created_at,
+            p.last_modified_at
+        FROM [dbo].[underdog_projection] p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[underdog_projection_stage] s
+            WHERE s.projection_id = p.projection_id
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[underdog_projection_history] h
+            WHERE h.projection_id = p.projection_id
+              AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+              AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+        );
+
+        DELETE p
+        FROM [dbo].[underdog_projection] p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[underdog_projection_stage] s
+            WHERE s.projection_id = p.projection_id
+        );
+    END
+    """
+
+    # Deduplicate multiple odds snapshots that appear for the same logical bet inside the latest stage set.
+    # Keep only the newest snapshot in underdog_projection (by last_modified_at), archive the rest to history.
+    dedupe_stage_snapshots_sql = """
+    IF EXISTS (SELECT 1 FROM [dbo].[underdog_projection_stage])
+    BEGIN
+        IF OBJECT_ID('tempdb..#underdog_stage_dupes') IS NOT NULL DROP TABLE #underdog_stage_dupes;
+
+        ;WITH ranked AS (
+            SELECT
+                p.projection_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        p.appearance_id,
+                        p.stat_type_name,
+                        p.line_type,
+                        p.line_score,
+                        p.start_time
+                    ORDER BY
+                        p.last_modified_at DESC,
+                        p.projection_id DESC
+                ) AS rn
+            FROM [dbo].[underdog_projection] p
+            WHERE EXISTS (
+                SELECT 1
+                FROM [dbo].[underdog_projection_stage] s
+                WHERE s.projection_id = p.projection_id
+            )
+        )
+        SELECT projection_id
+        INTO #underdog_stage_dupes
+        FROM ranked
+        WHERE rn > 1;
+
+        INSERT INTO [dbo].[underdog_projection_history] (
+            projection_id, display_name, stat_type_name, line_score, start_time,
+            underdog_player_id,
+            api_id, over_under_id, provider_id, stat_value, line_type, status, rank,
+            sort_by, stable_id, expires_at, updated_at, contract_terms_url, contract_url,
+            live_event, live_event_stat, non_discounted_stat_value,
+            ou_title, ou_category, ou_display_mode, ou_grid_display_title,
+            ou_has_alternates, ou_option_priority, ou_prediction_market,
+            ou_scoring_type_id, ou_team_divider,
+            appearance_stat_id, appearance_id, display_stat, stat, graded_by,
+            pickem_stat_id, appearance_stat_rank,
+            options,
+            created_at, last_modified_at
+        )
+        SELECT
+            p.projection_id,
+            p.display_name,
+            p.stat_type_name,
+            p.line_score,
+            p.start_time,
+            p.underdog_player_id,
+            p.api_id,
+            p.over_under_id,
+            p.provider_id,
+            p.stat_value,
+            p.line_type,
+            p.status,
+            p.rank,
+            p.sort_by,
+            p.stable_id,
+            p.expires_at,
+            p.updated_at,
+            p.contract_terms_url,
+            p.contract_url,
+            p.live_event,
+            p.live_event_stat,
+            p.non_discounted_stat_value,
+            p.ou_title,
+            p.ou_category,
+            p.ou_display_mode,
+            p.ou_grid_display_title,
+            p.ou_has_alternates,
+            p.ou_option_priority,
+            p.ou_prediction_market,
+            p.ou_scoring_type_id,
+            p.ou_team_divider,
+            p.appearance_stat_id,
+            p.appearance_id,
+            p.display_stat,
+            p.stat,
+            p.graded_by,
+            p.pickem_stat_id,
+            p.appearance_stat_rank,
+            p.options,
+            SYSUTCDATETIME() AS created_at,
+            p.last_modified_at
+        FROM [dbo].[underdog_projection] p
+        INNER JOIN #underdog_stage_dupes d
+            ON d.projection_id = p.projection_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[underdog_projection_history] h
+            WHERE h.projection_id = p.projection_id
+              AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+              AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+        );
+
+        DELETE p
+        FROM [dbo].[underdog_projection] p
+        INNER JOIN #underdog_stage_dupes d
+            ON d.projection_id = p.projection_id;
+    END
+    """
+
     merge_sql = """
     MERGE [dbo].[underdog_projection] AS t
     USING [dbo].[underdog_projection_stage] AS s
@@ -523,10 +724,31 @@ def upsert_underdog_from_stage(
 
     with conn:
         cursor = conn.cursor()
-        cursor.execute(history_sql)
-        cursor.execute(merge_sql)
+        try:
+            cursor.execute(history_sql)
+        except Exception as e:
+            raise RuntimeError(f"history_sql failed: {e}") from e
+
+        try:
+            cursor.execute(merge_sql)
+        except Exception as e:
+            raise RuntimeError(f"merge_sql failed: {e}") from e
+
         merged = cursor.rowcount
-        cursor.execute(move_expired_sql)
+        # 1) Archive projections that are missing from the latest API snapshot (stage).
+        try:
+            cursor.execute(move_missing_from_stage_sql)
+        except Exception as e:
+            raise RuntimeError(f"move_missing_from_stage_sql failed: {e}") from e
+        # 2) Within the latest API snapshot, keep only the newest odds snapshot per logical bet.
+        try:
+            cursor.execute(dedupe_stage_snapshots_sql)
+        except Exception as e:
+            raise RuntimeError(f"dedupe_stage_snapshots_sql failed: {e}") from e
+        try:
+            cursor.execute(move_expired_sql)
+        except Exception as e:
+            raise RuntimeError(f"move_expired_sql failed: {e}") from e
     conn.close()
     return merged
 
@@ -578,7 +800,10 @@ def upsert_underdog_player_from_stage(
     """
     with conn:
         cursor = conn.cursor()
-        cursor.execute(sql)
+        try:
+            cursor.execute(sql)
+        except Exception as e:
+            raise RuntimeError(f"upsert_underdog_player_from_stage MERGE failed: {e}") from e
         count = cursor.rowcount
     conn.close()
     return count
@@ -627,7 +852,10 @@ def upsert_underdog_appearance_from_stage(
     """
     with conn:
         cursor = conn.cursor()
-        cursor.execute(sql)
+        try:
+            cursor.execute(sql)
+        except Exception as e:
+            raise RuntimeError(f"upsert_underdog_appearance_from_stage MERGE failed: {e}") from e
         count = cursor.rowcount
     conn.close()
     return count
@@ -695,7 +923,10 @@ def upsert_underdog_game_from_stage(
     """
     with conn:
         cursor = conn.cursor()
-        cursor.execute(sql)
+        try:
+            cursor.execute(sql)
+        except Exception as e:
+            raise RuntimeError(f"upsert_underdog_game_from_stage MERGE failed: {e}") from e
         count = cursor.rowcount
     conn.close()
     return count
@@ -760,7 +991,10 @@ def upsert_underdog_solo_game_from_stage(
     """
     with conn:
         cursor = conn.cursor()
-        cursor.execute(sql)
+        try:
+            cursor.execute(sql)
+        except Exception as e:
+            raise RuntimeError(f"upsert_underdog_solo_game_from_stage MERGE failed: {e}") from e
         count = cursor.rowcount
     conn.close()
     return count
@@ -1401,11 +1635,12 @@ def main():
             with conn:
                 cursor = conn.cursor()
                 cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+                insert_sql = f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({placeholders})"
                 for r in rows:
-                    cursor.execute(
-                        f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({placeholders})",
-                        [r.get(c) for c in cols],
-                    )
+                    try:
+                        cursor.execute(insert_sql, [r.get(c) for c in cols])
+                    except Exception as e:
+                        raise RuntimeError(f"stage insert failed for table {table}: {e}") from e
             conn.close()
             return len(rows)
 

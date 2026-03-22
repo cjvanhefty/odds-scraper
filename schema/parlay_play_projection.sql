@@ -19,7 +19,7 @@ CREATE TABLE [dbo].[parlay_play_projection](
 	[show_default] [bit] NULL,
 	[display_name] [nvarchar](100) NOT NULL,
 	[stat_type_name] [nvarchar](100) NOT NULL,
-	[start_time] [datetimeoffset](3) NULL,
+	[start_time] [datetime2](3) NULL,
 	[promo_deadline] [datetimeoffset](3) NULL,
 	[promo_max_entry] [decimal](10, 2) NULL,
 	[player_promo_id] [int] NULL,

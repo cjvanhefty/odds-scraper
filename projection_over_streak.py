@@ -142,7 +142,8 @@ def get_projections(
     now_central = "CAST(GETUTCDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2(0))"
     where_parts = [
         "p.player_id IS NOT NULL",
-        "(p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%')",
+        # Exclude most generic combo markets, but keep Blks+Stls (PrizePicks sometimes labels it as a combo)
+        "((p.stat_type_name NOT LIKE N'%(Combo)%' AND p.stat_type_name NOT LIKE N'%Combo%') OR p.stat_type_name LIKE N'Blks+Stls%')",
         f"p.start_time >= DATEADD(day, -30, CAST({now_central} AS DATE))",
     ]
     params = []
@@ -156,6 +157,35 @@ def get_projections(
         where_parts.append(f"p.league_id IN ({placeholders})")
         params.extend(league_ids)
     where_sql = " AND ".join(where_parts)
+    # Providers don't always use the exact same stat label strings as PrizePicks.
+    # Normalize a small set of known-equivalent labels for joins (especially Blocks/Blocked Shots).
+    stat_join_expr_p = """
+        CASE
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) LIKE N'Blks+Stls%' THEN N'Blks_Stls'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made') THEN N'FG3M'
+            ELSE LTRIM(RTRIM(p.stat_type_name))
+        END
+    """
+    stat_join_expr_ud0 = """
+        CASE
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Blks+Stls', N'Blocks + Steals', N'Blocks+Steals') THEN N'Blks_Stls'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made') THEN N'FG3M'
+            ELSE LTRIM(RTRIM(ud0.stat_type_name))
+        END
+    """
+    stat_join_expr_ud1 = """
+        CASE
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Blks+Stls', N'Blocks + Steals', N'Blocks+Steals') THEN N'Blks_Stls'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made') THEN N'FG3M'
+            ELSE LTRIM(RTRIM(ud1.stat_type_name))
+        END
+    """
     sql = f"""
         SELECT
             p.projection_id,
@@ -182,21 +212,21 @@ def get_projections(
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
         LEFT JOIN [dbo].[player] pl
-            ON pl.prizepicks_player_id = TRY_CAST(p.player_id AS BIGINT)
+            ON pl.prizepicks_player_id = TRY_CAST(pp.prizepicks_player_id AS INT)
         OUTER APPLY (
             SELECT TOP 1 ud0.line_score
             FROM [dbo].[underdog_projection] ud0
             INNER JOIN [dbo].[underdog_appearance] ua ON ua.id = ud0.appearance_id
             INNER JOIN [dbo].[underdog_player] up ON up.id = ua.player_id
             WHERE up.underdog_player_id = pl.underdog_player_id
-              AND ud0.stat_type_name = p.stat_type_name
+              AND {stat_join_expr_ud0} = {stat_join_expr_p}
               AND CONVERT(date, ud0.start_time) = CONVERT(date, p.start_time)
         ) ud
         OUTER APPLY (
             SELECT TOP 1 ud1.line_score
             FROM [dbo].[underdog_projection] ud1
             WHERE LTRIM(RTRIM(ud1.display_name)) = LTRIM(RTRIM(pp.display_name))
-              AND ud1.stat_type_name = p.stat_type_name
+              AND {stat_join_expr_ud1} = {stat_join_expr_p}
               AND CONVERT(date, ud1.start_time) = CONVERT(date, p.start_time)
         ) ud_fb
         LEFT JOIN [dbo].[prizepicks_game] g
