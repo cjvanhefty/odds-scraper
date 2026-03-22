@@ -7,6 +7,7 @@ Use --input to load from a JSON file, or --browser to force browser capture.
 
 import db_config  # noqa: F401 - load .env from repo root before DB
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,8 +21,81 @@ CHICAGO = ZoneInfo("America/Chicago")
 CHICAGO_FMT = "%m/%d/%Y %H:%M:%S"  # 03/17/2026 17:06:00
 
 
-def _chicago_str_to_db_datetimeoffset(s: str) -> str | None:
-    """Convert Chicago-format 'MM/DD/YYYY HH:MM:SS' to SQL Server datetimeoffset string (Central)."""
+def _stable_hash_int64(*parts) -> int:
+    """
+    Deterministic positive 63-bit integer hash for identity keys.
+    Avoids Python's salted built-in `hash()` so projection IDs stay stable across runs.
+    """
+    m = hashlib.sha256()
+    for p in parts:
+        if p is None:
+            m.update(b"\x00")
+        else:
+            # Use repr() for floats so 19.0 and 19.00 behave consistently.
+            if isinstance(p, float):
+                m.update(repr(p).encode("utf-8"))
+            else:
+                m.update(str(p).encode("utf-8"))
+        m.update(b"\x1f")  # unit separator
+    v = int.from_bytes(m.digest()[:8], "big", signed=False)
+    v = v & ((1 << 63) - 1)  # keep within signed bigint positive range
+    return v or 1
+
+
+def _ensure_parlay_play_projection_history_table(cursor) -> None:
+    """Create parlay_play_projection_history if missing.
+
+    We do this in code (not only via schema/*.sql) so ETL can reliably archive+delete.
+    """
+    cursor.execute(
+        """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+        BEGIN
+            CREATE TABLE [dbo].[parlay_play_projection_history](
+                [history_id] [bigint] IDENTITY(1,1) NOT NULL,
+                [projection_id] [bigint] NOT NULL,
+                [match_id] [int] NOT NULL,
+                [player_id] [int] NOT NULL,
+                [challenge_option] [nvarchar](50) NOT NULL,
+                [line_score] [decimal](10, 2) NULL,
+                [is_main_line] [bit] NOT NULL,
+                [decimal_price_over] [decimal](10, 4) NULL,
+                [decimal_price_under] [decimal](10, 4) NULL,
+                [market_name] [nvarchar](150) NULL,
+                [match_period] [nvarchar](20) NULL,
+                [show_default] [bit] NULL,
+                [display_name] [nvarchar](100) NOT NULL,
+                [stat_type_name] [nvarchar](100) NOT NULL,
+                [start_time] [datetimeoffset](3) NULL,
+                [promo_deadline] [datetimeoffset](3) NULL,
+                [promo_max_entry] [decimal](10, 2) NULL,
+                [player_promo_id] [int] NULL,
+                [player_promo_type] [nvarchar](50) NULL,
+                [is_boosted_payout] [bit] NULL,
+                [is_player_promo] [bit] NULL,
+                [default_multiplier] [decimal](10, 4) NULL,
+                [promo_multiplier] [decimal](10, 4) NULL,
+                [payout_boost_selection] [nvarchar](20) NULL,
+                [is_public] [bit] NULL,
+                [is_slashed_line] [bit] NULL,
+                [alt_line_count] [int] NULL,
+                [last_modified_at] [datetime2](7) NOT NULL,
+                [archived_at] [datetime2](7) NOT NULL DEFAULT SYSUTCDATETIME(),
+                [archive_reason] [nvarchar](20) NULL,
+                CONSTRAINT [PK_parlay_play_projection_history] PRIMARY KEY CLUSTERED ([history_id] ASC)
+            ) ON [PRIMARY];
+
+            CREATE NONCLUSTERED INDEX [IX_parlay_play_projection_history_projection_id]
+                ON [dbo].[parlay_play_projection_history]
+                ([projection_id], [start_time])
+                INCLUDE ([line_score], [decimal_price_over], [decimal_price_under]);
+        END
+        """
+    )
+
+
+def _chicago_str_to_db_datetime2(s: str) -> str | None:
+    """Convert Chicago-format 'MM/DD/YYYY HH:MM:SS' to SQL Server datetime2 string (Central local, no offset)."""
     if not s or not isinstance(s, str):
         return None
     s = s.strip()
@@ -29,11 +103,8 @@ def _chicago_str_to_db_datetimeoffset(s: str) -> str | None:
         return None
     try:
         dt = datetime.strptime(s, CHICAGO_FMT)
-        dt = dt.replace(tzinfo=CHICAGO)
-        # SQL Server datetimeoffset: 'YYYY-MM-DD HH:MM:SS -06:00' (Python %z is -0600)
-        z = dt.strftime("%z")
-        offset = (z[:3] + ":" + z[3:]) if len(z) == 5 else " -06:00"
-        return dt.strftime("%Y-%m-%d %H:%M:%S") + offset
+        # Store as Chicago local time WITHOUT offset (datetime2)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
 
@@ -80,19 +151,26 @@ STAT_NORMALIZE = {
     "blocks": "Blocks",
     "tov": "Turnovers",
     "turnovers": "Turnovers",
+    # Blocks+Steals (aka "stocks")
+    "blksstls": "Blks+Stls",
+    "blockssteals": "Blks+Stls",
+    "stocks": "Blks+Stls",
     "3pm": "3 Pointers Made",
     "3pmade": "3 Pointers Made",
+    "3pointersmade": "3 Pointers Made",
     "threes": "3 Pointers Made",
     "3pt": "3 Pointers",
     "3ptm": "3 Pointers Made",
     "3ptmade": "3 Pointers Made",
+    # ParlayPlay API stat_type values (e.g. bb_threePointersMade)
+    "bbthreepointersmade": "3 Pointers Made",
     "oreb": "Offensive Rebounds",
     "dreb": "Defensive Rebounds",
     "ptsreb": "Pts+Rebs",
     "ptsast": "Pts+Asts",
     "ptsrebast": "Pts+Rebs+Asts",
     "rebast": "Rebs+Asts",
-    "fantasypoints": "Fantasy Points",
+    "fantasypoints": "Fantasy Score",
 }
 
 
@@ -101,6 +179,45 @@ def _normalize_stat(s: str) -> str:
         return ""
     key = re.sub(r"[^a-z0-9]", "", s.strip().lower())
     return STAT_NORMALIZE.get(key, s.strip())
+
+def _normalize_market_name(s: str | None) -> str | None:
+    if not s:
+        return None
+    v = str(s).strip()
+    if not v:
+        return None
+    # Parlay Play sometimes labels this "Player Fantasy Score (PrizePicks)".
+    # We normalize to a site-agnostic "Fantasy Score".
+    if "fantasy score" in v.lower():
+        return "Fantasy Score"
+    v = v.replace("(PrizePicks)", "").strip()
+    return v
+
+
+def _stat_type_from_market_name(market_name: str | None) -> str | None:
+    """Map ParlayPlay market_name (UI label) to canonical PrizePicks stat_type_name."""
+    m = (market_name or "").strip()
+    if not m:
+        return None
+    key = re.sub(r"[^a-z0-9]", "", m.lower())
+    market_map = {
+        # NBA canonical stat types
+        "playerpoints": "Points",
+        "playerrebounds": "Rebounds",
+        "playerassists": "Assists",
+        "playersteals": "Steals",
+        "playerblocks": "Blocks",
+        "playerblockedshots": "Blocked Shots",
+        "playermadethrees": "3 Pointers Made",
+        "playerpointsrebounds": "Pts+Rebs",
+        "playerpointsassists": "Pts+Asts",
+        "playerreboundsassists": "Rebs+Asts",
+        "playerpointsreboundsassists": "Pts+Rebs+Asts",
+        "playerdoubledouble": "Double Doubles",
+        "playertripledouble": "Triple Doubles",
+        "fantasyscore": "Fantasy Score",
+    }
+    return market_map.get(key)
 
 
 def _get_db_conn(
@@ -175,9 +292,7 @@ def parse_records_from_json(data) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        projection_id = hash(key) & 0x7FFFFFFF
-        if projection_id < 0:
-            projection_id = -projection_id
+        projection_id = _stable_hash_int64(*key)
         records.append({
             "projection_id": projection_id,
             "display_name": name[:100] if name else "",
@@ -288,9 +403,7 @@ def _parse_crossgame_response(data) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        projection_id = hash(key) & 0x7FFFFFFF
-        if projection_id < 0:
-            projection_id = -projection_id
+        projection_id = _stable_hash_int64(*key)
         records.append({
             "projection_id": projection_id,
             "display_name": (name or "")[:100],
@@ -349,9 +462,7 @@ def _parse_crossgame_players(body: dict) -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
-            projection_id = hash(key) & 0x7FFFFFFF
-            if projection_id < 0:
-                projection_id = -projection_id
+            projection_id = _stable_hash_int64(*key)
             records.append({
                 "projection_id": projection_id,
                 "display_name": (name or "")[:100],
@@ -465,7 +576,7 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                 "home_team_id": _id_from_ref(home_team),
                 "away_team_id": _id_from_ref(away_team),
                 "slug": (match.get("slug") or "")[:150],
-                "match_date": _chicago_str_to_db_datetimeoffset(match_date_conv) if match_date_conv else None,
+                "match_date": _chicago_str_to_db_datetime2(match_date_conv) if match_date_conv else None,
                 "match_type": (match.get("matchType") or "")[:50],
                 "match_status": _int_or_none(match.get("matchStatus")),
                 "match_period": (match.get("matchPeriod") or "")[:20],
@@ -499,7 +610,6 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
         start_time_str = _to_chicago_datetime(match_date) if match_date else None
         if not start_time_str:
             continue
-        stat_type_name = _normalize_stat("") or "Unknown"
         for stat_obj in stats_list:
             if not isinstance(stat_obj, dict):
                 continue
@@ -514,7 +624,14 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                     "challenge_units": (stat_obj.get("challengeUnits") or "")[:20],
                 }
             raw_stat = (stat_obj.get("challengeName") or "").strip()
-            stat_type_name = _normalize_stat(raw_stat) or raw_stat or "Unknown"
+            # Prefer mapping based on market_name (more stable than challengeName).
+            market_name_norm = _normalize_market_name((stat_obj.get("altLines") or {}).get("market") if isinstance(stat_obj.get("altLines"), dict) else None)
+            stat_type_name = (
+                _stat_type_from_market_name(market_name_norm)
+                or _normalize_stat(raw_stat)
+                or raw_stat
+                or "Unknown"
+            )
             # Main line
             main_line = stat_obj.get("statValue")
             if main_line is not None:
@@ -522,10 +639,48 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                     main_line = float(main_line)
                 except (TypeError, ValueError):
                     main_line = None
+            # Prefer the main line from altLines.values (isMainLine=true) when statValue is missing/zero.
+            # Parlay Play often returns statValue=0 while providing the real line/prices in altLines.
+            alt_lines = stat_obj.get("altLines") or {}
+            values = alt_lines.get("values") if isinstance(alt_lines, dict) else []
+            main_alt = None
+            if isinstance(values, list):
+                for _a in values:
+                    if isinstance(_a, dict) and bool(_a.get("isMainLine")):
+                        main_alt = _a
+                        break
+            # Treat ParlayPlay sentinel values as "missing":
+            # - 0.0 shows up for many stats even when the real line is in altLines
+            # - -100.0 shows up for Fantasy Score (PrizePicks) while the real line is in altLines
+            invalid_main = (main_line is None) or (main_line == 0.0) or (main_line == -100.0)
+            if invalid_main and isinstance(main_alt, dict):
+                sp = main_alt.get("selectionPoints")
+                try:
+                    sp = float(sp) if sp is not None else None
+                except (TypeError, ValueError):
+                    sp = None
+                if sp is not None and sp != 0.0:
+                    main_line = sp
+                    # Use alt main prices for the main line row (more accurate than defaultMultiplier-only).
+                    main_decimal_over = _float_or_none(main_alt.get("decimalPriceOver"))
+                    main_decimal_under = _float_or_none(main_alt.get("decimalPriceUnder"))
+                    main_show_default = bool(main_alt.get("showDefault")) if main_alt.get("showDefault") is not None else None
+                else:
+                    main_decimal_over = None
+                    main_decimal_under = None
+                    main_show_default = None
+            else:
+                main_decimal_over = None
+                main_decimal_under = None
+                main_show_default = None
+
+            # If main_line is still invalid after substitution attempt, skip inserting it.
+            if main_line in (0.0, -100.0):
+                continue
             if main_line is not None:
-                proj_id = (hash((match_id, player_id, challenge_option, main_line, True)) & 0x7FFFFFFF) or 1
-                if proj_id < 0:
-                    proj_id = -proj_id
+                # Identity key excludes line_score/decimal prices.
+                # Main line uses alt_index = -1 to avoid colliding with alt idx starting at 0.
+                proj_id = _stable_hash_int64(match_id, player_id, challenge_option, -1)
                 projections.append(_projection_row(
                     projection_id=proj_id,
                     match_id=match_id,
@@ -533,10 +688,11 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                     challenge_option=challenge_option,
                     line_score=main_line,
                     is_main_line=True,
-                    decimal_price_over=_float_or_none(stat_obj.get("defaultMultiplier")),
-                    decimal_price_under=None,
-                    market_name=(stat_obj.get("altLines") or {}).get("market") if isinstance(stat_obj.get("altLines"), dict) else None,
+                    decimal_price_over=main_decimal_over if main_decimal_over is not None else _float_or_none(stat_obj.get("defaultMultiplier")),
+                    decimal_price_under=main_decimal_under,
+                    market_name=market_name_norm,
                     match_period=(stat_obj.get("matchPeriods") or [None])[0] if isinstance(stat_obj.get("matchPeriods"), list) else None,
+                    show_default=main_show_default,
                     display_name=name[:100],
                     stat_type_name=stat_type_name[:100],
                     start_time_str=start_time_str,
@@ -544,8 +700,6 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                     alt_line_count=_int_or_none(stat_obj.get("altLineCount")),
                 ))
             # Alt lines
-            alt_lines = stat_obj.get("altLines") or {}
-            values = alt_lines.get("values") if isinstance(alt_lines, dict) else []
             if isinstance(values, list):
                 for idx, alt in enumerate(values):
                     if not isinstance(alt, dict):
@@ -558,12 +712,14 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                     except (TypeError, ValueError):
                         continue
                     is_main = bool(alt.get("isMainLine"))
-                    proj_id = (hash((match_id, player_id, challenge_option, pts, is_main, idx)) & 0x7FFFFFFF) or 1
-                    if proj_id < 0:
-                        proj_id = -proj_id
+                    # Avoid duplicating the "main line" row: we materialize main line once (alt_index=-1).
+                    if is_main:
+                        continue
                     ct = alt.get("challengeType")
                     co = (ct.get("challengeOption") or challenge_option) if isinstance(ct, dict) else challenge_option
-                    market_name = (alt.get("marketName") or (alt_lines.get("market") if isinstance(alt_lines, dict) else "") or "")[:150]
+                    # Identity key for alt lines uses alt index (idx), not line_score/decimal prices.
+                    proj_id = _stable_hash_int64(match_id, player_id, (co or "")[:50], idx)
+                    market_name = _normalize_market_name((alt.get("marketName") or (alt_lines.get("market") if isinstance(alt_lines, dict) else "") or "")[:150])
                     projections.append(_projection_row(
                         projection_id=proj_id,
                         match_id=match_id,
@@ -598,9 +754,9 @@ def _projection_row(
     decimal_price_over, decimal_price_under, market_name, match_period, display_name, stat_type_name, start_time_str,
     stat_obj, show_default=None, alt_line_count=None,
 ):
-    start_db = _chicago_str_to_db_datetimeoffset(start_time_str)
+    start_db = _chicago_str_to_db_datetime2(start_time_str)
     promo = stat_obj.get("promoDeadline")
-    promo_db = _chicago_str_to_db_datetimeoffset(_to_chicago_datetime(promo)) if promo else None
+    promo_db = _chicago_str_to_db_datetime2(_to_chicago_datetime(promo)) if promo else None
     return {
         "projection_id": projection_id,
         "match_id": match_id,
@@ -690,17 +846,50 @@ def load_parlay_play_etl(
     conn = _get_db_conn(server, database, user, password, trusted_connection)
     cursor = conn.cursor()
     try:
+        def _resolve_target_pk_column(target_table: str) -> str:
+            """
+            Some deployments use `id` as the PK column name.
+            Others use `{table_name}_id` (e.g. `parlay_play_player_id`).
+            This resolves which PK column the target table has so MERGE statements work.
+            """
+            fallback = f"{target_table}_id"
+            cursor.execute(
+                """
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = 'dbo'
+                  AND TABLE_NAME = ?
+                  AND COLUMN_NAME IN ('id', ?)
+                """,
+                (target_table, fallback),
+            )
+            cols = [r[0] for r in cursor.fetchall()]
+            if "id" in cols:
+                return "id"
+            if fallback in cols:
+                return fallback
+            # If neither exists, we need to know the correct PK name.
+            raise RuntimeError(
+                f"Cannot resolve PK column for target table {target_table}. Expected 'id' or '{fallback}'."
+            )
+
         # Load stages (order: sport, league, team, match, player, stat_type, projection)
         def run_truncate_insert(table: str, cols: list[str], rows: list[dict]):
             if not rows:
                 return
-            cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+            try:
+                cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+            except Exception as e:
+                raise RuntimeError(f"truncate failed for table {table}: {e}") from e
             ph = ", ".join("?" * len(cols))
             for r in rows:
-                cursor.execute(
-                    f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({ph})",
-                    [r.get(c) for c in cols],
-                )
+                insert_sql = f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({ph})"
+                try:
+                    cursor.execute(insert_sql, [r.get(c) for c in cols])
+                except Exception as e:
+                    raise RuntimeError(
+                        f"stage insert failed for table {table}. Insert cols={cols}. Error: {e}"
+                    ) from e
         sport_cols = ["id", "sport_name", "slug", "symbol", "illustration", "popularity"]
         run_truncate_insert("parlay_play_sport_stage", sport_cols, list(sports.values()))
         league_cols = ["id", "sport_id", "league_name", "league_name_short", "slug", "popularity", "allowed_players_per_match"]
@@ -716,54 +905,60 @@ def load_parlay_play_etl(
         proj_cols = ["projection_id", "match_id", "player_id", "challenge_option", "line_score", "is_main_line", "decimal_price_over", "decimal_price_under", "market_name", "match_period", "show_default", "display_name", "stat_type_name", "start_time", "promo_deadline", "promo_max_entry", "player_promo_id", "player_promo_type", "is_boosted_payout", "is_player_promo", "default_multiplier", "promo_multiplier", "payout_boost_selection", "is_public", "is_slashed_line", "alt_line_count"]
         run_truncate_insert("parlay_play_projection_stage", proj_cols, all_projections)
         # MERGE in dependency order (inline, same as prizepicks/underdog; ODBC requires trailing ;)
-        _merge_sport = """
+        sport_pk = _resolve_target_pk_column("parlay_play_sport")
+        league_pk = _resolve_target_pk_column("parlay_play_league")
+        team_pk = _resolve_target_pk_column("parlay_play_team")
+        match_pk = _resolve_target_pk_column("parlay_play_match")
+        player_pk = _resolve_target_pk_column("parlay_play_player")
+
+        _merge_sport = f"""
         MERGE [dbo].[parlay_play_sport] AS t
-        USING [dbo].[parlay_play_sport_stage] AS s ON t.id = s.id
+        USING [dbo].[parlay_play_sport_stage] AS s ON t.{sport_pk} = s.id
         WHEN MATCHED THEN UPDATE SET
             t.sport_name = s.sport_name, t.slug = s.slug, t.symbol = s.symbol,
             t.illustration = s.illustration, t.popularity = s.popularity, t.last_modified_at = GETUTCDATE()
-        WHEN NOT MATCHED BY TARGET THEN INSERT (id, sport_name, slug, symbol, illustration, popularity, last_modified_at)
+        WHEN NOT MATCHED BY TARGET THEN INSERT ({sport_pk}, sport_name, slug, symbol, illustration, popularity, last_modified_at)
         VALUES (s.id, s.sport_name, s.slug, s.symbol, s.illustration, s.popularity, GETUTCDATE());
         """
-        _merge_league = """
+        _merge_league = f"""
         MERGE [dbo].[parlay_play_league] AS t
-        USING [dbo].[parlay_play_league_stage] AS s ON t.id = s.id
+        USING [dbo].[parlay_play_league_stage] AS s ON t.{league_pk} = s.id
         WHEN MATCHED THEN UPDATE SET
             t.sport_id = s.sport_id, t.league_name = s.league_name, t.league_name_short = s.league_name_short,
             t.slug = s.slug, t.popularity = s.popularity, t.allowed_players_per_match = s.allowed_players_per_match, t.last_modified_at = GETUTCDATE()
-        WHEN NOT MATCHED BY TARGET THEN INSERT (id, sport_id, league_name, league_name_short, slug, popularity, allowed_players_per_match, last_modified_at)
+        WHEN NOT MATCHED BY TARGET THEN INSERT ({league_pk}, sport_id, league_name, league_name_short, slug, popularity, allowed_players_per_match, last_modified_at)
         VALUES (s.id, s.sport_id, s.league_name, s.league_name_short, s.slug, s.popularity, s.allowed_players_per_match, GETUTCDATE());
         """
-        _merge_team = """
+        _merge_team = f"""
         MERGE [dbo].[parlay_play_team] AS t
-        USING [dbo].[parlay_play_team_stage] AS s ON t.id = s.id
+        USING [dbo].[parlay_play_team_stage] AS s ON t.{team_pk} = s.id
         WHEN MATCHED THEN UPDATE SET
             t.sport_id = s.sport_id, t.league_id = s.league_id, t.teamname = s.teamname, t.teamname_abbr = s.teamname_abbr,
             t.team_abbreviation = s.team_abbreviation, t.slug = s.slug, t.venue = s.venue, t.logo = s.logo,
             t.conference = s.conference, t.rank = s.rank, t.record = s.record, t.last_modified_at = GETUTCDATE()
-        WHEN NOT MATCHED BY TARGET THEN INSERT (id, sport_id, league_id, teamname, teamname_abbr, team_abbreviation, slug, venue, logo, conference, rank, record, last_modified_at)
+        WHEN NOT MATCHED BY TARGET THEN INSERT ({team_pk}, sport_id, league_id, teamname, teamname_abbr, team_abbreviation, slug, venue, logo, conference, rank, record, last_modified_at)
         VALUES (s.id, s.sport_id, s.league_id, s.teamname, s.teamname_abbr, s.team_abbreviation, s.slug, s.venue, s.logo, s.conference, s.rank, s.record, GETUTCDATE());
         """
-        _merge_match = """
+        _merge_match = f"""
         MERGE [dbo].[parlay_play_match] AS t
-        USING [dbo].[parlay_play_match_stage] AS s ON t.id = s.id
+        USING [dbo].[parlay_play_match_stage] AS s ON t.{match_pk} = s.id
         WHEN MATCHED THEN UPDATE SET
             t.sport_id = s.sport_id, t.league_id = s.league_id, t.home_team_id = s.home_team_id, t.away_team_id = s.away_team_id,
             t.slug = s.slug, t.match_date = s.match_date, t.match_type = s.match_type, t.match_status = s.match_status,
             t.match_period = s.match_period, t.score_home = s.score_home, t.score_away = s.score_away,
             t.time_left = s.time_left, t.time_to_start = s.time_to_start, t.time_to_start_min = s.time_to_start_min,
             t.home_win_prob = s.home_win_prob, t.away_win_prob = s.away_win_prob, t.draw_prob = s.draw_prob, t.last_modified_at = GETUTCDATE()
-        WHEN NOT MATCHED BY TARGET THEN INSERT (id, sport_id, league_id, home_team_id, away_team_id, slug, match_date, match_type, match_status, match_period, score_home, score_away, time_left, time_to_start, time_to_start_min, home_win_prob, away_win_prob, draw_prob, last_modified_at)
+        WHEN NOT MATCHED BY TARGET THEN INSERT ({match_pk}, sport_id, league_id, home_team_id, away_team_id, slug, match_date, match_type, match_status, match_period, score_home, score_away, time_left, time_to_start, time_to_start_min, home_win_prob, away_win_prob, draw_prob, last_modified_at)
         VALUES (s.id, s.sport_id, s.league_id, s.home_team_id, s.away_team_id, s.slug, s.match_date, s.match_type, s.match_status, s.match_period, s.score_home, s.score_away, s.time_left, s.time_to_start, s.time_to_start_min, s.home_win_prob, s.away_win_prob, s.draw_prob, GETUTCDATE());
         """
-        _merge_player = """
+        _merge_player = f"""
         MERGE [dbo].[parlay_play_player] AS t
-        USING [dbo].[parlay_play_player_stage] AS s ON t.id = s.id
+        USING [dbo].[parlay_play_player_stage] AS s ON t.{player_pk} = s.id
         WHEN MATCHED THEN UPDATE SET
             t.sport_id = s.sport_id, t.team_id = s.team_id, t.first_name = s.first_name, t.last_name = s.last_name,
             t.full_name = s.full_name, t.name_initial = s.name_initial, t.image = s.image, t.position = s.position,
             t.gender = s.gender, t.popularity = s.popularity, t.show_alt_lines = s.show_alt_lines, t.last_modified_at = GETUTCDATE()
-        WHEN NOT MATCHED BY TARGET THEN INSERT (id, sport_id, team_id, first_name, last_name, full_name, name_initial, image, position, gender, popularity, show_alt_lines, last_modified_at)
+        WHEN NOT MATCHED BY TARGET THEN INSERT ({player_pk}, sport_id, team_id, first_name, last_name, full_name, name_initial, image, position, gender, popularity, show_alt_lines, last_modified_at)
         VALUES (s.id, s.sport_id, s.team_id, s.first_name, s.last_name, s.full_name, s.name_initial, s.image, s.position, s.gender, s.popularity, s.show_alt_lines, GETUTCDATE());
         """
         _merge_stat_type = """
@@ -805,6 +1000,127 @@ def load_parlay_play_etl(
         WHEN NOT MATCHED BY TARGET THEN INSERT (projection_id, match_id, player_id, challenge_option, line_score, is_main_line, decimal_price_over, decimal_price_under, market_name, match_period, show_default, display_name, stat_type_name, start_time, promo_deadline, promo_max_entry, player_promo_id, player_promo_type, is_boosted_payout, is_player_promo, default_multiplier, promo_multiplier, payout_boost_selection, is_public, is_slashed_line, alt_line_count, last_modified_at)
         VALUES (s.projection_id, s.match_id, s.player_id, s.challenge_option, s.line_score, s.is_main_line, s.decimal_price_over, s.decimal_price_under, s.market_name, s.match_period, s.show_default, s.display_name, s.stat_type_name, s.start_time, s.promo_deadline, s.promo_max_entry, s.player_promo_id, s.player_promo_type, s.is_boosted_payout, s.is_player_promo, s.default_multiplier, s.promo_multiplier, s.payout_boost_selection, s.is_public, s.is_slashed_line, s.alt_line_count, GETUTCDATE());
         """
+        # Archive/cleanup logic for `parlay_play_projection`:
+        # - When a projection disappears from the latest Parlay Play response (missing from stage),
+        #   move it to history and delete from the active table.
+        # - When an update arrives (line_score or decimal prices changed), move the old active row to history.
+        # NOTE: We archive full rows from the active table; the active row is then updated/inserted by the MERGE below.
+        src_def = """
+            SELECT *
+            FROM (
+                SELECT
+                    s.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY s.projection_id
+                        ORDER BY
+                            CASE WHEN s.is_main_line = 1 THEN 0 ELSE 1 END,
+                            ISNULL(s.alt_line_count, 0) DESC,
+                            ISNULL(s.line_score, -1) DESC,
+                            ISNULL(s.match_id, 0) ASC,
+                            ISNULL(s.player_id, 0) ASC
+                    ) AS rn
+                FROM [dbo].[parlay_play_projection_stage] s
+            ) x
+            WHERE x.rn = 1
+        """
+        _archive_updated_parlay_play_projection = f"""
+        IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+        BEGIN
+            ;WITH src AS ({src_def})
+            INSERT INTO [dbo].[parlay_play_projection_history] (
+                projection_id, match_id, player_id, challenge_option,
+                line_score, is_main_line, decimal_price_over, decimal_price_under,
+                market_name, match_period, show_default,
+                display_name, stat_type_name, start_time,
+                promo_deadline, promo_max_entry, player_promo_id, player_promo_type,
+                is_boosted_payout, is_player_promo, default_multiplier, promo_multiplier,
+                payout_boost_selection, is_public, is_slashed_line, alt_line_count,
+                last_modified_at, archived_at, archive_reason
+            )
+            SELECT
+                p.projection_id, p.match_id, p.player_id, p.challenge_option,
+                p.line_score, p.is_main_line, p.decimal_price_over, p.decimal_price_under,
+                p.market_name, p.match_period, p.show_default,
+                p.display_name, p.stat_type_name, p.start_time,
+                p.promo_deadline, p.promo_max_entry, p.player_promo_id, p.player_promo_type,
+                p.is_boosted_payout, p.is_player_promo, p.default_multiplier, p.promo_multiplier,
+                p.payout_boost_selection, p.is_public, p.is_slashed_line, p.alt_line_count,
+                p.last_modified_at, SYSUTCDATETIME(), N'updated'
+            FROM [dbo].[parlay_play_projection] p
+            INNER JOIN src s
+                ON p.projection_id = s.projection_id
+            WHERE
+                (
+                    (p.line_score <> s.line_score)
+                    OR (p.line_score IS NULL AND s.line_score IS NOT NULL)
+                    OR (p.line_score IS NOT NULL AND s.line_score IS NULL)
+                    OR
+                    (p.decimal_price_over <> s.decimal_price_over)
+                    OR (p.decimal_price_over IS NULL AND s.decimal_price_over IS NOT NULL)
+                    OR (p.decimal_price_over IS NOT NULL AND s.decimal_price_over IS NULL)
+                    OR
+                    (p.decimal_price_under <> s.decimal_price_under)
+                    OR (p.decimal_price_under IS NULL AND s.decimal_price_under IS NOT NULL)
+                    OR (p.decimal_price_under IS NOT NULL AND s.decimal_price_under IS NULL)
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM [dbo].[parlay_play_projection_history] h
+                    WHERE h.projection_id = p.projection_id
+                      AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+                      AND ((h.decimal_price_over = p.decimal_price_over) OR (h.decimal_price_over IS NULL AND p.decimal_price_over IS NULL))
+                      AND ((h.decimal_price_under = p.decimal_price_under) OR (h.decimal_price_under IS NULL AND p.decimal_price_under IS NULL))
+                );
+        END
+        """
+        _archive_missing_parlay_play_projection = f"""
+        IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+        BEGIN
+            ;WITH src AS ({src_def})
+            INSERT INTO [dbo].[parlay_play_projection_history] (
+                projection_id, match_id, player_id, challenge_option,
+                line_score, is_main_line, decimal_price_over, decimal_price_under,
+                market_name, match_period, show_default,
+                display_name, stat_type_name, start_time,
+                promo_deadline, promo_max_entry, player_promo_id, player_promo_type,
+                is_boosted_payout, is_player_promo, default_multiplier, promo_multiplier,
+                payout_boost_selection, is_public, is_slashed_line, alt_line_count,
+                last_modified_at, archived_at, archive_reason
+            )
+            SELECT
+                p.projection_id, p.match_id, p.player_id, p.challenge_option,
+                p.line_score, p.is_main_line, p.decimal_price_over, p.decimal_price_under,
+                p.market_name, p.match_period, p.show_default,
+                p.display_name, p.stat_type_name, p.start_time,
+                p.promo_deadline, p.promo_max_entry, p.player_promo_id, p.player_promo_type,
+                p.is_boosted_payout, p.is_player_promo, p.default_multiplier, p.promo_multiplier,
+                p.payout_boost_selection, p.is_public, p.is_slashed_line, p.alt_line_count,
+                p.last_modified_at, SYSUTCDATETIME(), N'missing'
+            FROM [dbo].[parlay_play_projection] p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM src s WHERE s.projection_id = p.projection_id
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM [dbo].[parlay_play_projection_history] h
+                WHERE h.projection_id = p.projection_id
+                  AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+                  AND ((h.decimal_price_over = p.decimal_price_over) OR (h.decimal_price_over IS NULL AND p.decimal_price_over IS NULL))
+                  AND ((h.decimal_price_under = p.decimal_price_under) OR (h.decimal_price_under IS NULL AND p.decimal_price_under IS NULL))
+            );
+        END
+        """
+        _delete_missing_parlay_play_projection = f"""
+        IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+        BEGIN
+            ;WITH src AS ({src_def})
+            DELETE p
+            FROM [dbo].[parlay_play_projection] p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM src s WHERE s.projection_id = p.projection_id
+            );
+        END
+        """
         merges = (
             ("sport", _merge_sport),
             ("league", _merge_league),
@@ -814,9 +1130,25 @@ def load_parlay_play_etl(
             ("stat_type", _merge_stat_type),
             ("projection", _merge_projection),
         )
+        # Archive changes/missing first, then apply stage->projection upserts.
+        _ensure_parlay_play_projection_history_table(cursor)
+        archive_steps = [
+            ("archive_updated", _archive_updated_parlay_play_projection),
+            ("archive_missing", _archive_missing_parlay_play_projection),
+            ("delete_missing", _delete_missing_parlay_play_projection),
+        ]
+        for step_name, archive_sql in archive_steps:
+            archive_sql = archive_sql.strip().rstrip(";") + ";"
+            try:
+                cursor.execute(archive_sql)
+            except Exception as e:
+                raise RuntimeError(f"load_parlay_play_etl archive SQL failed: {e}") from e
         for merge_name, s in merges:
             s = s.strip().rstrip(";") + ";"
-            cursor.execute(s)
+            try:
+                cursor.execute(s)
+            except Exception as e:
+                raise RuntimeError(f"load_parlay_play_etl merge '{merge_name}' failed: {e}") from e
         count = cursor.rowcount
         conn.commit()
     finally:
@@ -863,6 +1195,93 @@ def upsert_parlay_play_from_stage(
     user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
     password = password or os.environ.get("PROPS_DB_PASSWORD", "")
     conn = _get_db_conn(server, database, user, password, trusted_connection)
+    history_updated_sql = """
+    IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+    BEGIN
+        INSERT INTO [dbo].[parlay_play_projection_history] (
+            projection_id, match_id, player_id, challenge_option,
+            line_score, is_main_line, decimal_price_over, decimal_price_under,
+            market_name, match_period, show_default,
+            display_name, stat_type_name, start_time,
+            promo_deadline, promo_max_entry, player_promo_id, player_promo_type,
+            is_boosted_payout, is_player_promo, default_multiplier, promo_multiplier,
+            payout_boost_selection, is_public, is_slashed_line, alt_line_count,
+            last_modified_at, archived_at, archive_reason
+        )
+        SELECT
+            p.projection_id, p.match_id, p.player_id, p.challenge_option,
+            p.line_score, p.is_main_line, p.decimal_price_over, p.decimal_price_under,
+            p.market_name, p.match_period, p.show_default,
+            p.display_name, p.stat_type_name, p.start_time,
+            p.promo_deadline, p.promo_max_entry, p.player_promo_id, p.player_promo_type,
+            p.is_boosted_payout, p.is_player_promo, p.default_multiplier, p.promo_multiplier,
+            p.payout_boost_selection, p.is_public, p.is_slashed_line, p.alt_line_count,
+            p.last_modified_at, SYSUTCDATETIME(), N'updated'
+        FROM [dbo].[parlay_play_projection] p
+        INNER JOIN [dbo].[parlay_play_projection_stage] s
+            ON p.projection_id = s.projection_id
+        WHERE
+            (
+                (p.line_score <> s.line_score)
+                OR (p.line_score IS NULL AND s.line_score IS NOT NULL)
+                OR (p.line_score IS NOT NULL AND s.line_score IS NULL)
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM [dbo].[parlay_play_projection_history] h
+                WHERE h.projection_id = p.projection_id
+                  AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+                  AND ((h.decimal_price_over = p.decimal_price_over) OR (h.decimal_price_over IS NULL AND p.decimal_price_over IS NULL))
+                  AND ((h.decimal_price_under = p.decimal_price_under) OR (h.decimal_price_under IS NULL AND p.decimal_price_under IS NULL))
+            );
+    END
+    """
+    history_missing_sql = """
+    IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+    BEGIN
+        INSERT INTO [dbo].[parlay_play_projection_history] (
+            projection_id, match_id, player_id, challenge_option,
+            line_score, is_main_line, decimal_price_over, decimal_price_under,
+            market_name, match_period, show_default,
+            display_name, stat_type_name, start_time,
+            promo_deadline, promo_max_entry, player_promo_id, player_promo_type,
+            is_boosted_payout, is_player_promo, default_multiplier, promo_multiplier,
+            payout_boost_selection, is_public, is_slashed_line, alt_line_count,
+            last_modified_at, archived_at, archive_reason
+        )
+        SELECT
+            p.projection_id, p.match_id, p.player_id, p.challenge_option,
+            p.line_score, p.is_main_line, p.decimal_price_over, p.decimal_price_under,
+            p.market_name, p.match_period, p.show_default,
+            p.display_name, p.stat_type_name, p.start_time,
+            p.promo_deadline, p.promo_max_entry, p.player_promo_id, p.player_promo_type,
+            p.is_boosted_payout, p.is_player_promo, p.default_multiplier, p.promo_multiplier,
+            p.payout_boost_selection, p.is_public, p.is_slashed_line, p.alt_line_count,
+            p.last_modified_at, SYSUTCDATETIME(), N'missing'
+        FROM [dbo].[parlay_play_projection] p
+        WHERE NOT EXISTS (
+            SELECT 1 FROM [dbo].[parlay_play_projection_stage] s WHERE s.projection_id = p.projection_id
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM [dbo].[parlay_play_projection_history] h
+            WHERE h.projection_id = p.projection_id
+              AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+              AND ((h.decimal_price_over = p.decimal_price_over) OR (h.decimal_price_over IS NULL AND p.decimal_price_over IS NULL))
+              AND ((h.decimal_price_under = p.decimal_price_under) OR (h.decimal_price_under IS NULL AND p.decimal_price_under IS NULL))
+        );
+    END
+    """
+    delete_missing_sql = """
+    IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'parlay_play_projection_history')
+    BEGIN
+        DELETE p
+        FROM [dbo].[parlay_play_projection] p
+        WHERE NOT EXISTS (
+            SELECT 1 FROM [dbo].[parlay_play_projection_stage] s WHERE s.projection_id = p.projection_id
+        );
+    END
+    """
     sql = """
     MERGE [dbo].[parlay_play_projection] AS t
     USING [dbo].[parlay_play_projection_stage] AS s
@@ -877,6 +1296,10 @@ def upsert_parlay_play_from_stage(
     sql = sql.strip().rstrip(";") + ";"
     with conn:
         cursor = conn.cursor()
+        _ensure_parlay_play_projection_history_table(cursor)
+        for archive_sql in (history_updated_sql, history_missing_sql, delete_missing_sql):
+            archive_sql = archive_sql.strip().rstrip(";") + ";"
+            cursor.execute(archive_sql)
         cursor.execute(sql)
         count = cursor.rowcount
     conn.close()
