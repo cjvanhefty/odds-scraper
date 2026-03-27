@@ -63,6 +63,8 @@ STAT_NORMALIZE = {
     "threes": "3 Pointers Made",
     "3pt": "3 Pointers",
     "3ptm": "3 Pointers Made",
+    # Underdog full-game 3PA label (see API display_stat "3s Attempted")
+    "3sattempted": "3-PT Attempted",
     "oreb": "Offensive Rebounds",
     "dreb": "Defensive Rebounds",
     # Common Underdog display_stat spellings for combos

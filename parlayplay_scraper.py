@@ -164,6 +164,13 @@ STAT_NORMALIZE = {
     "3ptmade": "3 Pointers Made",
     # ParlayPlay API stat_type values (e.g. bb_threePointersMade)
     "bbthreepointersmade": "3 Pointers Made",
+    "bbthreepointersattempted": "3-PT Attempted",
+    "bbthreepointfieldgoalsattempted": "3-PT Attempted",
+    "bbfg3a": "3-PT Attempted",
+    "bb3ptattempted": "3-PT Attempted",
+    "3sattempted": "3-PT Attempted",
+    "attemptedthrees": "3-PT Attempted",
+    "threepointersattempted": "3-PT Attempted",
     "oreb": "Offensive Rebounds",
     "dreb": "Defensive Rebounds",
     "ptsreb": "Pts+Rebs",
@@ -179,6 +186,18 @@ def _normalize_stat(s: str) -> str:
         return ""
     key = re.sub(r"[^a-z0-9]", "", s.strip().lower())
     return STAT_NORMALIZE.get(key, s.strip())
+
+
+def _parlay_infer_three_pt_attempt_stat(*parts: str | None) -> str | None:
+    """If any combined label clearly denotes 3PA (not 2PA), return PrizePicks-aligned stat name."""
+    blob = " ".join((p or "").strip() for p in parts if p).lower()
+    if not blob or "attempt" not in blob:
+        return None
+    if "two pointer" in blob or "2-pt" in blob or "2pt" in blob:
+        return None
+    if "three" in blob or "3-pt" in blob or "3pt" in blob or "pointer" in blob or "fg3" in blob or "3s" in blob:
+        return "3-PT Attempted"
+    return None
 
 def _normalize_market_name(s: str | None) -> str | None:
     if not s:
@@ -209,6 +228,12 @@ def _stat_type_from_market_name(market_name: str | None) -> str | None:
         "playerblocks": "Blocks",
         "playerblockedshots": "Blocked Shots",
         "playermadethrees": "3 Pointers Made",
+        "playerattemptedthrees": "3-PT Attempted",
+        "playerthreepointersattempted": "3-PT Attempted",
+        "player3pointattempts": "3-PT Attempted",
+        "player3pointersattempted": "3-PT Attempted",
+        "playerthreepointattempts": "3-PT Attempted",
+        "player3pointfieldgoalsattempted": "3-PT Attempted",
         "playerpointsrebounds": "Pts+Rebs",
         "playerpointsassists": "Pts+Asts",
         "playerreboundsassists": "Rebs+Asts",
@@ -674,6 +699,30 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                 main_decimal_under = None
                 main_show_default = None
 
+            main_market_name = market_name_norm
+            main_row_stat_type_name = stat_type_name
+            if isinstance(main_alt, dict):
+                main_market_name = _normalize_market_name(
+                    (main_alt.get("marketName") or market_name_norm or "")[:150]
+                ) or market_name_norm
+                mct = main_alt.get("challengeType")
+                mcn = (mct.get("challengeName") or "").strip() if isinstance(mct, dict) else ""
+                mco = (
+                    ((mct.get("challengeOption") or challenge_option) or "")[:50].strip()
+                    if isinstance(mct, dict)
+                    else (challenge_option or "")[:50].strip()
+                )
+                refined_main = (
+                    _parlay_infer_three_pt_attempt_stat(main_market_name, mcn, mco, market_name_norm)
+                    or _normalize_stat(mco)
+                    or _normalize_stat(mcn)
+                    or _stat_type_from_market_name(main_market_name)
+                    or (mcn if mcn else None)
+                    or stat_type_name
+                )
+                if refined_main:
+                    main_row_stat_type_name = refined_main
+
             # If main_line is still invalid after substitution attempt, skip inserting it.
             if main_line in (0.0, -100.0):
                 continue
@@ -690,11 +739,11 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                     is_main_line=True,
                     decimal_price_over=main_decimal_over if main_decimal_over is not None else _float_or_none(stat_obj.get("defaultMultiplier")),
                     decimal_price_under=main_decimal_under,
-                    market_name=market_name_norm,
+                    market_name=main_market_name,
                     match_period=(stat_obj.get("matchPeriods") or [None])[0] if isinstance(stat_obj.get("matchPeriods"), list) else None,
                     show_default=main_show_default,
                     display_name=name[:100],
-                    stat_type_name=stat_type_name[:100],
+                    stat_type_name=main_row_stat_type_name[:100],
                     start_time_str=start_time_str,
                     stat_obj=stat_obj,
                     alt_line_count=_int_or_none(stat_obj.get("altLineCount")),
@@ -717,9 +766,21 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                         continue
                     ct = alt.get("challengeType")
                     co = (ct.get("challengeOption") or challenge_option) if isinstance(ct, dict) else challenge_option
-                    # Identity key for alt lines uses alt index (idx), not line_score/decimal prices.
+                    # Identity key for alt index (idx), not line_score/decimal prices.
                     proj_id = _stable_hash_int64(match_id, player_id, (co or "")[:50], idx)
                     market_name = _normalize_market_name((alt.get("marketName") or (alt_lines.get("market") if isinstance(alt_lines, dict) else "") or "")[:150])
+                    alt_cn = (ct.get("challengeName") or "").strip() if isinstance(ct, dict) else ""
+                    co_s = ((co or "")[:50]).strip()
+                    parent_mkt = market_name_norm if isinstance(alt_lines, dict) else None
+                    # Prefer challengeOption/Name over inherited parent market (often "Player Made Threes" for both 3PM and 3PA alts).
+                    alt_stat_type_name = (
+                        _parlay_infer_three_pt_attempt_stat(market_name, alt_cn, co_s, parent_mkt)
+                        or _normalize_stat(co_s)
+                        or _normalize_stat(alt_cn)
+                        or _stat_type_from_market_name(market_name)
+                        or (alt_cn or stat_type_name)
+                        or "Unknown"
+                    )
                     projections.append(_projection_row(
                         projection_id=proj_id,
                         match_id=match_id,
@@ -733,7 +794,7 @@ def extract_crossgame_etl(body: dict) -> tuple[dict, dict, dict, dict, dict, dic
                         match_period=(alt.get("matchPeriod") or "")[:20],
                         show_default=bool(alt.get("showDefault")) if alt.get("showDefault") is not None else None,
                         display_name=name[:100],
-                        stat_type_name=stat_type_name[:100],
+                        stat_type_name=alt_stat_type_name[:100],
                         start_time_str=start_time_str,
                         stat_obj=stat_obj,
                     ))
