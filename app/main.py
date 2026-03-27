@@ -5,6 +5,7 @@ Run from repo root: uvicorn app.main:app --reload
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,31 +61,127 @@ def _json_safe(val):
     return val
 
 
-def _normalize_join_stat(stat_type_name: str | None) -> str:
-    """Normalize stat names for cross-provider joins (UI keys), without changing what we display."""
-    s = (stat_type_name or "").strip()
+def _normalize_join_stat_aliases_only(s: str) -> str:
+    """PrizePicks-equivalent label merge for joins (Blocks, DD, 3PT)."""
     if s in ("Blocks", "Blocked Shots"):
         return "Blocks__Blocked_Shots"
     if s in ("Double Doubles", "Double-Doubles"):
         return "Double_Doubles"
-    if s.startswith("Blks+Stls"):
+    # Align with projection_over_streak stat_join_expr_ud0/ud1: Blks+Stls, Blocks + Steals, Blocks+Steals
+    if s.startswith("Blks+Stls") or s in ("Blocks + Steals", "Blocks+Steals"):
         return "Blks_Stls"
-    if s in ("3 Pointers", "3 Pointers Made"):
+    if s in ("3-PT Attempted", "3 Pointers Attempted", "3s Attempted"):
+        return "FG3A"
+    if s in ("3 Pointers", "3 Pointers Made", "3-PT Made"):
         return "FG3M"
     return s
+
+
+def _normalize_join_stat(stat_type_name: str | None) -> str:
+    """Normalize stat names for cross-provider joins (UI keys), without changing what we display."""
+    s = (stat_type_name or "").strip()
+    pre = _normalize_join_stat_aliases_only(s)
+    if pre != s:
+        return pre
+    # Parlay Play often stores API codes in stat_type_name (bb_points, bb_ptsReb) while PrizePicks uses
+    # "Points", "Pts+Rebs", etc. Keys match parlayplay_scraper._normalize_stat (alphanumeric only).
+    key = re.sub(r"[^a-z0-9]", "", s.lower())
+    mapped = _JOIN_STAT_ALNUM.get(key)
+    if mapped is not None:
+        return _normalize_join_stat_aliases_only(mapped)
+    return s
+
+
+# Same idea as parlayplay_scraper.STAT_NORMALIZE plus bb_/bab_* challenge codes seen in DB.
+_JOIN_STAT_ALNUM: dict[str, str] = {
+    "pts": "Points",
+    "points": "Points",
+    "reb": "Rebounds",
+    "rebounds": "Rebounds",
+    "ast": "Assists",
+    "assists": "Assists",
+    "stl": "Steals",
+    "steals": "Steals",
+    "blk": "Blocks",
+    "blocks": "Blocks",
+    "tov": "Turnovers",
+    "turnovers": "Turnovers",
+    "blksstls": "Blks+Stls",
+    "blockssteals": "Blks+Stls",
+    "stocks": "Blks+Stls",
+    "3pm": "3 Pointers Made",
+    "3pmade": "3 Pointers Made",
+    "3pointersmade": "3 Pointers Made",
+    "threes": "3 Pointers Made",
+    "3pt": "3 Pointers",
+    "3ptm": "3 Pointers Made",
+    "3ptmade": "3 Pointers Made",
+    "bbthreepointersmade": "3 Pointers Made",
+    "bbthreepointersattempted": "3-PT Attempted",
+    "bbthreepointfieldgoalsattempted": "3-PT Attempted",
+    "bbfg3a": "3-PT Attempted",
+    "bb3ptattempted": "3-PT Attempted",
+    "3sattempted": "3-PT Attempted",
+    "attemptedthrees": "3-PT Attempted",
+    "threepointersattempted": "3-PT Attempted",
+    "oreb": "Offensive Rebounds",
+    "dreb": "Defensive Rebounds",
+    "ptsreb": "Pts+Rebs",
+    "ptsast": "Pts+Asts",
+    "ptsrebast": "Pts+Rebs+Asts",
+    "rebast": "Rebs+Asts",
+    "fantasypoints": "Fantasy Score",
+    # NBA bb_* codes (parlay_play_projection.stat_type_name)
+    "bbpoints": "Points",
+    "bbrebounds": "Rebounds",
+    "bbassists": "Assists",
+    "bbsteals": "Steals",
+    "bbblocks": "Blocks",
+    "bbturnovers": "Turnovers",
+    "bbpersonal": "Personal Fouls",
+    "bbptsreb": "Pts+Rebs",
+    "bbptsast": "Pts+Asts",
+    "bbptsrebast": "Pts+Rebs+Asts",
+    "bbrebast": "Rebs+Asts",
+    "bbdd": "Double Doubles",
+    "bbtd": "Triple Doubles",
+    "bbfgmade": "FG Made",
+    "bbfgattempted": "FG Attempted",
+    "bbtwopointersmade": "Two Pointers Made",
+    "bbtwopointersattempted": "Two Pointers Attempted",
+    "bbfreethrowsmade": "Free Throws Made",
+    "bbfreethrowsattempted": "Free Throws Attempted",
+    "bbparlaypoints": "Fantasy Score",
+    "bbfirstbasket": "First Basket",
+    # MLB bab_* codes
+    "babhrr": "Hits + Runs + RBIs",
+    "babrbi": "RBIs",
+    "babsingles": "Singles",
+    "babdoubles": "Doubles",
+    "babhits": "Hits",
+    "babhomeruns": "Home Runs",
+    "babruns": "Runs",
+    "babstrikeouts": "Strikeouts",
+    "babtotalbases": "Total Bases",
+    "babtriples": "Triples",
+}
 
 
 def get_parlay_play_lines_by_match(conn) -> dict:
     """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks."""
     cursor = conn.cursor()
     try:
+        # Include alt lines: 3-PT attempts are often is_main_line=0 while sharing a parent "made threes" market.
+        # ORDER BY is_main_line DESC so the first row per key is the main line when the same stat appears twice.
         cursor.execute("""
             SELECT display_name, stat_type_name,
                    CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
                    line_score
             FROM [dbo].[parlay_play_projection]
             WHERE display_name IS NOT NULL AND stat_type_name IS NOT NULL
-              AND is_main_line = 1
+            ORDER BY display_name, stat_type_name,
+                     CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120),
+                     is_main_line DESC
         """)
         key_to_line = {}
         for row in cursor.fetchall():
@@ -93,7 +190,10 @@ def get_parlay_play_lines_by_match(conn) -> dict:
             date_part = (row[2] or "")[:10]
             line = float(row[3]) if row[3] is not None else None
             if name and stat and date_part:
-                key_to_line[(name, stat, date_part)] = line
+                key = (name, stat, date_part)
+                if key in key_to_line:
+                    continue
+                key_to_line[key] = line
         return key_to_line
     except Exception:
         return {}

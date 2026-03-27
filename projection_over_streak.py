@@ -36,6 +36,8 @@ STAT_COLUMN_MAP = {
     "Offensive Rebounds": "oreb",
     "3 Pointers Made": "fg3m",
     "3 Pointers": "fg3m",
+    "3-PT Made": "fg3m",
+    "3-PT Attempted": "fg3a",
     "FG Made": "fgm",
     "FG Attempted": "fga",
     "Personal Fouls": "pf",
@@ -164,7 +166,8 @@ def get_projections(
             WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
             WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
             WHEN LTRIM(RTRIM(p.stat_type_name)) LIKE N'Blks+Stls%' THEN N'Blks_Stls'
-            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3-PT Attempted', N'3 Pointers Attempted', N'3s Attempted') THEN N'FG3A'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made') THEN N'FG3M'
             ELSE LTRIM(RTRIM(p.stat_type_name))
         END
     """
@@ -173,7 +176,8 @@ def get_projections(
             WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
             WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
             WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Blks+Stls', N'Blocks + Steals', N'Blocks+Steals') THEN N'Blks_Stls'
-            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3-PT Attempted', N'3 Pointers Attempted', N'3s Attempted') THEN N'FG3A'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made') THEN N'FG3M'
             ELSE LTRIM(RTRIM(ud0.stat_type_name))
         END
     """
@@ -182,7 +186,8 @@ def get_projections(
             WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
             WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
             WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Blks+Stls', N'Blocks + Steals', N'Blocks+Steals') THEN N'Blks_Stls'
-            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3-PT Attempted', N'3 Pointers Attempted', N'3s Attempted') THEN N'FG3A'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made') THEN N'FG3M'
             ELSE LTRIM(RTRIM(ud1.stat_type_name))
         END
     """
