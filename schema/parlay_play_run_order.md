@@ -19,4 +19,6 @@ Run these scripts in order (dependencies: raw has none; sport before league/team
 11. **link_parlay_play_player_to_player.sql** – add parlay_play_player_id to [player] (requires [player] and parlay_play_player)
 
 **After loading stage tables from scraper/ETL:**
-- **parlay_play_merge_stage.sql** – MERGEs sport_stage → sport, league_stage → league, team_stage → team, match_stage → match, player_stage → player, stat_type_stage → stat_type, projection_stage → projection (in dependency order).
+- **parlay_play_reference_merge.sql** – creates `dbo.MergeParlayPlayFromStage` (PrizePicks-like change detection; updates only when changed).
+- Then run: `EXEC [dbo].[MergeParlayPlayFromStage]`.
+- (Legacy) **parlay_play_merge_stage.sql** – older one-off MERGE batches that update matched rows unconditionally.
