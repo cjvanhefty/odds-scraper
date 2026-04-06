@@ -228,6 +228,34 @@ def _normalize_projection_record_minimal(r: dict) -> dict:
     }
 
 
+def _collect_underdog_stat_type_stage_rows(projection_rows: list[dict]) -> list[dict]:
+    """One row per pickem_stat_id (Underdog external id). Skips projections without pickem_stat_id."""
+    out: dict[str, dict] = {}
+    for r in projection_rows:
+        pid = r.get("pickem_stat_id")
+        if pid is None:
+            continue
+        ps = str(pid).strip()
+        if not ps:
+            continue
+        pid_val = ps[:36]
+        if pid_val in out:
+            continue
+        stn = (r.get("stat_type_name") or "").strip() or "Unknown"
+        stn = stn[:100]
+        ds = r.get("display_stat")
+        ds_str = (str(ds).strip()[:200] if ds is not None and str(ds).strip() else None)
+        st = r.get("stat")
+        st_str = (str(st).strip()[:200] if st is not None and str(st).strip() else None)
+        out[pid_val] = {
+            "pickem_stat_id": pid_val,
+            "stat_type_name": stn,
+            "display_stat": ds_str,
+            "stat": st_str,
+        }
+    return list(out.values())
+
+
 def insert_underdog_stage(
     records: list[dict],
     server: str = "localhost\\SQLEXPRESS",
@@ -811,6 +839,48 @@ def upsert_underdog_player_from_stage(
     return count
 
 
+def upsert_underdog_stat_type_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> int:
+    """MERGE underdog_stat_type_stage into underdog_stat_type. Returns rows affected."""
+    import pyodbc
+
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    sql = """
+    MERGE [dbo].[underdog_stat_type] AS t
+    USING [dbo].[underdog_stat_type_stage] AS s
+      ON t.pickem_stat_id = s.pickem_stat_id
+    WHEN MATCHED AND NOT (
+            (t.stat_type_name = s.stat_type_name OR (t.stat_type_name IS NULL AND s.stat_type_name IS NULL))
+        AND (t.display_stat = s.display_stat OR (t.display_stat IS NULL AND s.display_stat IS NULL))
+        AND (t.stat = s.stat OR (t.stat IS NULL AND s.stat IS NULL))
+    ) THEN
+      UPDATE SET
+        t.stat_type_name = s.stat_type_name,
+        t.display_stat = s.display_stat,
+        t.stat = s.stat,
+        t.last_modified_at = GETUTCDATE()
+    WHEN NOT MATCHED BY TARGET THEN
+      INSERT (pickem_stat_id, stat_type_name, display_stat, stat, last_modified_at)
+      VALUES (s.pickem_stat_id, s.stat_type_name, s.display_stat, s.stat, GETUTCDATE());
+    """
+    with conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql)
+        except Exception as e:
+            raise RuntimeError(f"upsert_underdog_stat_type_from_stage MERGE failed: {e}") from e
+        count = cursor.rowcount
+    conn.close()
+    return count
+
+
 def upsert_underdog_appearance_from_stage(
     server: str = "localhost\\SQLEXPRESS",
     database: str = "Props",
@@ -1000,6 +1070,29 @@ def upsert_underdog_solo_game_from_stage(
         count = cursor.rowcount
     conn.close()
     return count
+
+
+def merge_underdog_reference_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> None:
+    """Run dbo.MergeUnderdogReferenceFromStage (game/player/solo_game/appearance; change-detection MERGEs).
+
+    Requires schema/underdog_reference_merge.sql applied. Replaces separate upsert_*_from_stage calls
+    for those four tables.
+    """
+    import pyodbc
+
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("EXEC [dbo].[MergeUnderdogReferenceFromStage]")
+    conn.close()
 
 
 OVER_UNDER_LINES_URL = "https://api.underdogfantasy.com/beta/v5/over_under_lines"
@@ -1625,8 +1718,14 @@ def main():
         except ImportError:
             pass
 
-        def _insert_stage_helper(table: str, cols: list[str], rows: list[dict]) -> int:
-            if not rows:
+        def _insert_stage_helper(
+            table: str,
+            cols: list[str],
+            rows: list[dict],
+            *,
+            truncate_if_empty: bool = False,
+        ) -> int:
+            if not rows and not truncate_if_empty:
                 return 0
             import pyodbc
 
@@ -1634,16 +1733,19 @@ def main():
             password = args.db_password or os.environ.get("PROPS_DB_PASSWORD", "")
             conn = _get_db_conn(args.db_server, args.database, user, password, trusted)
             placeholders = ", ".join("?" * len(cols))
-            with conn:
-                cursor = conn.cursor()
-                cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
-                insert_sql = f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({placeholders})"
-                for r in rows:
-                    try:
-                        cursor.execute(insert_sql, [r.get(c) for c in cols])
-                    except Exception as e:
-                        raise RuntimeError(f"stage insert failed for table {table}: {e}") from e
-            conn.close()
+            try:
+                with conn:
+                    cursor = conn.cursor()
+                    cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+                    if rows:
+                        insert_sql = f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({placeholders})"
+                        for r in rows:
+                            try:
+                                cursor.execute(insert_sql, [r.get(c) for c in cols])
+                            except Exception as e:
+                                raise RuntimeError(f"stage insert failed for table {table}: {e}") from e
+            finally:
+                conn.close()
             return len(rows)
 
         # Players
@@ -1741,42 +1843,83 @@ def main():
         if sn:
             print(f"Staged {sn} solo game rows into underdog_solo_game_stage")
 
-        # Merge stage tables into main Underdog tables
-        player_merged = upsert_underdog_player_from_stage(
-            server=args.db_server,
-            database=args.database,
-            user=args.db_user,
-            password=args.db_password,
-            trusted_connection=trusted,
+        # Use projections_to_stage only — same rows as underdog_projection_stage. _LAST_UNDERDOG_PROJECTIONS
+        # is filled only inside parse_underdog_over_under_api(); JSON / other parsers append only to records.
+        stat_type_stage_rows = _collect_underdog_stat_type_stage_rows(projections_to_stage)
+        stat_type_cols = [
+            "pickem_stat_id",
+            "stat_type_name",
+            "display_stat",
+            "stat",
+        ]
+        staged_stat_types = _insert_stage_helper(
+            "underdog_stat_type_stage",
+            stat_type_cols,
+            stat_type_stage_rows,
+            truncate_if_empty=True,
         )
-        print(f"Merged {player_merged} rows into underdog_player")
+        if staged_stat_types:
+            print(f"Staged {staged_stat_types} stat type rows into underdog_stat_type_stage")
+        elif not stat_type_stage_rows:
+            print("Cleared underdog_stat_type_stage (no stat types in this run)")
 
-        appearance_merged = upsert_underdog_appearance_from_stage(
-            server=args.db_server,
-            database=args.database,
-            user=args.db_user,
-            password=args.db_password,
-            trusted_connection=trusted,
-        )
-        print(f"Merged {appearance_merged} rows into underdog_appearance")
-
-        game_merged = upsert_underdog_game_from_stage(
-            server=args.db_server,
-            database=args.database,
-            user=args.db_user,
-            password=args.db_password,
-            trusted_connection=trusted,
-        )
-        print(f"Merged {game_merged} rows into underdog_game")
-
-        solo_merged = upsert_underdog_solo_game_from_stage(
-            server=args.db_server,
-            database=args.database,
-            user=args.db_user,
-            password=args.db_password,
-            trusted_connection=trusted,
-        )
-        print(f"Merged {solo_merged} rows into underdog_solo_game")
+        # Merge reference stage tables via dbo.MergeUnderdogReferenceFromStage (see schema/underdog_reference_merge.sql)
+        try:
+            merge_underdog_reference_from_stage(
+                server=args.db_server,
+                database=args.database,
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(
+                "MergeUnderdogReferenceFromStage completed (underdog_stat_type, underdog_game, underdog_player, underdog_solo_game, underdog_appearance)"
+            )
+        except Exception as e:
+            print(f"MergeUnderdogReferenceFromStage failed ({e}); falling back to inline MERGEs.")
+            try:
+                stat_type_merged = upsert_underdog_stat_type_from_stage(
+                    server=args.db_server,
+                    database=args.database,
+                    user=args.db_user,
+                    password=args.db_password,
+                    trusted_connection=trusted,
+                )
+                print(f"Merged {stat_type_merged} rows into underdog_stat_type")
+            except Exception as e2:
+                print(f"underdog_stat_type fallback MERGE failed ({e2})")
+            player_merged = upsert_underdog_player_from_stage(
+                server=args.db_server,
+                database=args.database,
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Merged {player_merged} rows into underdog_player")
+            appearance_merged = upsert_underdog_appearance_from_stage(
+                server=args.db_server,
+                database=args.database,
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Merged {appearance_merged} rows into underdog_appearance")
+            game_merged = upsert_underdog_game_from_stage(
+                server=args.db_server,
+                database=args.database,
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Merged {game_merged} rows into underdog_game")
+            solo_merged = upsert_underdog_solo_game_from_stage(
+                server=args.db_server,
+                database=args.database,
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Merged {solo_merged} rows into underdog_solo_game")
 
     return 0
 
