@@ -472,6 +472,9 @@ def parse_to_stage_records(response: dict, league_id: int | None) -> list[dict]:
         else:
             league_id_val = str(p_attrs.get("league_id", league_id) or league_id)
 
+        ppid_raw = p_attrs.get("ppid")
+        ppid = (str(ppid_raw).strip()[:200] or None) if ppid_raw is not None else None
+
         records.append({
             "player_id": player_id,
             "combo": bool(p_attrs.get("combo", False)),
@@ -486,6 +489,7 @@ def parse_to_stage_records(response: dict, league_id: int | None) -> list[dict]:
             "team_name": (p_attrs.get("team_name") or "")[:100],
             "league_id": league_id_val[:20],
             "team_id": (team_id or "")[:20],
+            "ppid": ppid,
         })
 
     return records
@@ -500,7 +504,20 @@ PRIZEPICKS_GAME_STAGE_COLS = [
     "display_name", "image_url", "jersey_number", "league", "league_id", "position", "team", "team_name",
     "active", "f2p_enabled", "has_live_projections", "icon", "last_five_games_enabled",
     "league_icon_id", "parent_id", "parent_name", "projections_count", "show_trending",
+    "metadata_json",
 ]
+
+PRIZEPICKS_LEAGUE_STAGE_COLS = [
+    "league_id", "active", "f2p_enabled", "has_live_projections", "icon", "image_url",
+    "last_five_games_enabled", "league_icon_id", "name", "parent_id", "parent_name",
+    "projections_count", "rank", "show_trending", "projection_filters_json",
+]
+PRIZEPICKS_TEAM_STAGE_COLS = [
+    "team_id", "abbreviation", "market", "name", "primary_color", "secondary_color", "tertiary_color",
+]
+PRIZEPICKS_STAT_TYPE_STAGE_COLS = ["stat_type_id", "name", "rank", "lfg_ignored_leagues_json"]
+PRIZEPICKS_DURATION_STAGE_COLS = ["duration_id", "name"]
+PRIZEPICKS_PROJECTION_TYPE_STAGE_COLS = ["projection_type_id", "name"]
 
 
 def _game_attr_str(val, max_len: int = 50) -> str | None:
@@ -508,6 +525,17 @@ def _game_attr_str(val, max_len: int = 50) -> str | None:
         return None
     s = (str(val) or "").strip()
     return s[:max_len] if s else None
+
+
+def _game_metadata_json(attrs: dict) -> str | None:
+    meta = attrs.get("metadata")
+    if meta is None:
+        return None
+    if isinstance(meta, (dict, list)):
+        out = json.dumps(meta, separators=(",", ":"), default=str)
+        return out if out else None
+    s = (str(meta) or "").strip()
+    return s if s else None
 
 
 # API may use "game", "games", "Game", etc. for game entities in included
@@ -636,9 +664,110 @@ def parse_to_game_stage_records(response: dict) -> list[dict]:
             "parent_name": _game_attr_str(attrs.get("parent_name"), 100),
             "projections_count": int(attrs.get("projections_count")) if attrs.get("projections_count") is not None else None,
             "show_trending": _b(attrs.get("show_trending")),
+            "metadata_json": _game_metadata_json(attrs),
         })
 
     return records
+
+
+def parse_included_reference_records(resp: dict) -> dict[str, list[dict]]:
+    """Extract league/team/stat_type/duration/projection_type rows from JSON:API included (last wins per id)."""
+    included = resp.get("included") or []
+    leagues: dict[str, dict] = {}
+    teams: dict[str, dict] = {}
+    stat_types: dict[str, dict] = {}
+    durations: dict[str, dict] = {}
+    proj_types: dict[str, dict] = {}
+
+    def _bit(v):
+        if v is None:
+            return None
+        return bool(v)
+
+    def _safe_int(v):
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    for item in included:
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type") or ""
+        raw_id = item.get("id")
+        if raw_id is None:
+            continue
+        sid = str(raw_id).strip()[:20]
+        attrs = item.get("attributes") or {}
+
+        if itype == "league":
+            rels = item.get("relationships") or {}
+            pf = rels.get("projection_filters") or {}
+            pdata = pf.get("data")
+            # JSON:API: data may be null, a single resource object (dict), or an array (list).
+            if pdata is None:
+                pf_json = "null"
+            elif isinstance(pdata, (list, dict)):
+                pf_json = json.dumps(pdata)
+            else:
+                pf_json = json.dumps(pdata, default=str)
+            parent_id = attrs.get("parent_id")
+            leagues[sid] = {
+                "league_id": sid,
+                "active": _bit(attrs.get("active")),
+                "f2p_enabled": _bit(attrs.get("f2p_enabled")),
+                "has_live_projections": _bit(attrs.get("has_live_projections")),
+                "icon": (str(attrs.get("icon") or "")[:50] or None),
+                "image_url": (str(attrs.get("image_url") or "")[:2000] or None),
+                "last_five_games_enabled": _bit(attrs.get("last_five_games_enabled")),
+                "league_icon_id": _safe_int(attrs.get("league_icon_id")),
+                "name": str(attrs.get("name") or sid)[:100],
+                "parent_id": str(parent_id)[:20] if parent_id is not None else None,
+                "parent_name": (str(attrs.get("parent_name") or "")[:100] or None),
+                "projections_count": _safe_int(attrs.get("projections_count")),
+                "rank": _safe_int(attrs.get("rank")),
+                "show_trending": _bit(attrs.get("show_trending")),
+                "projection_filters_json": pf_json,
+            }
+        elif itype == "team":
+            teams[sid] = {
+                "team_id": sid,
+                "abbreviation": (str(attrs.get("abbreviation") or "")[:10] or None),
+                "market": (str(attrs.get("market") or "")[:100] or None),
+                "name": (str(attrs.get("name") or "")[:100] or None),
+                "primary_color": (str(attrs.get("primary_color") or "")[:20] or None),
+                "secondary_color": (str(attrs.get("secondary_color") or "")[:20] or None),
+                "tertiary_color": (str(attrs.get("tertiary_color") or "")[:20] or None),
+            }
+        elif itype == "stat_type":
+            lfg = attrs.get("lfg_ignored_leagues")
+            lfg_json = json.dumps(lfg) if isinstance(lfg, list) else "[]"
+            stat_types[sid] = {
+                "stat_type_id": sid,
+                "name": str(attrs.get("name") or sid)[:200],
+                "rank": _safe_int(attrs.get("rank")),
+                "lfg_ignored_leagues_json": lfg_json,
+            }
+        elif itype == "duration":
+            durations[sid] = {
+                "duration_id": sid,
+                "name": str(attrs.get("name") or sid)[:100],
+            }
+        elif itype == "projection_type":
+            proj_types[sid] = {
+                "projection_type_id": sid,
+                "name": str(attrs.get("name") or sid)[:100],
+            }
+
+    return {
+        "league": list(leagues.values()),
+        "team": list(teams.values()),
+        "stat_type": list(stat_types.values()),
+        "duration": list(durations.values()),
+        "projection_type": list(proj_types.values()),
+    }
 
 
 def insert_game_stage(
@@ -701,6 +830,66 @@ def upsert_game_from_stage(
         count = cursor.rowcount
     conn.close()
     return count
+
+
+def insert_included_reference_stages(
+    ref: dict[str, list[dict]],
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> dict[str, int]:
+    """Truncate and load league/team/stat_type/duration/projection_type stage tables only."""
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    specs = [
+        ("prizepicks_league_stage", PRIZEPICKS_LEAGUE_STAGE_COLS, ref["league"]),
+        ("prizepicks_team_stage", PRIZEPICKS_TEAM_STAGE_COLS, ref["team"]),
+        ("prizepicks_stat_type_stage", PRIZEPICKS_STAT_TYPE_STAGE_COLS, ref["stat_type"]),
+        ("prizepicks_duration_stage", PRIZEPICKS_DURATION_STAGE_COLS, ref["duration"]),
+        ("prizepicks_projection_type_stage", PRIZEPICKS_PROJECTION_TYPE_STAGE_COLS, ref["projection_type"]),
+    ]
+    counts: dict[str, int] = {}
+    with conn:
+        cursor = conn.cursor()
+        for table, cols, rows in specs:
+            try:
+                cursor.execute(f"TRUNCATE TABLE [dbo].[{table}]")
+            except Exception:
+                counts[table] = -1
+                continue
+            if not rows:
+                counts[table] = 0
+                continue
+            ph = ", ".join("?" * len(cols))
+            sql = f"INSERT INTO [dbo].[{table}] ({', '.join(cols)}) VALUES ({ph})"
+            n = 0
+            for r in rows:
+                cursor.execute(sql, [r.get(c) for c in cols])
+                n += cursor.rowcount
+            counts[table] = n
+    conn.close()
+    return counts
+
+
+def merge_included_reference_from_stage(
+    server: str = "localhost\\SQLEXPRESS",
+    database: str = "Props",
+    user: str | None = None,
+    password: str | None = None,
+    trusted_connection: bool = False,
+) -> None:
+    """Run MergePrizepicksIncludedReferenceFromStage (requires prizepicks_included_reference.sql applied)."""
+    user = user or os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = password or os.environ.get("PROPS_DB_PASSWORD", "")
+    conn = _get_db_conn(server, database, user, password, trusted_connection)
+    with conn:
+        cursor = conn.cursor()
+        cursor.execute("EXEC [dbo].[MergePrizepicksIncludedReferenceFromStage]")
+    conn.close()
 
 
 def _get_db_conn(
@@ -1003,8 +1192,19 @@ def ensure_player_stage_table(conn) -> None:
             [team_name] [nvarchar](100) NULL,
             [league_id] [nvarchar](20) NULL,
             [team_id] [nvarchar](20) NULL,
+            [ppid] [nvarchar](200) NULL,
             CONSTRAINT [PK_prizepicks_player_stage] PRIMARY KEY ([player_id])
         )
+        END
+    """)
+    cursor.execute("""
+        IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_player_stage')
+           AND NOT EXISTS (
+               SELECT 1 FROM sys.columns
+               WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_player_stage]') AND name = N'ppid'
+           )
+        BEGIN
+            ALTER TABLE [dbo].[prizepicks_player_stage] ADD [ppid] [nvarchar](200) NULL;
         END
     """)
     conn.commit()
@@ -1027,7 +1227,7 @@ def insert_player_stage(
     cols = [
         "player_id", "combo", "display_name", "image_url", "jersey_number",
         "league", "market", "name", "position", "team", "team_name",
-        "league_id", "team_id",
+        "league_id", "team_id", "ppid",
     ]
     placeholders = ", ".join("?" * len(cols))
     count = 0
@@ -1072,19 +1272,30 @@ def upsert_player_from_stage(
             t.team = s.team,
             t.team_name = s.team_name,
             t.league_id = s.league_id,
-            t.team_id = s.team_id
+            t.team_id = s.team_id,
+            t.ppid = s.ppid
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             player_id, combo, display_name, image_url, jersey_number,
             league, market, name, position, team, team_name,
-            league_id, team_id
+            league_id, team_id, ppid
         ) VALUES (
             s.player_id, s.combo, s.display_name, s.image_url, s.jersey_number,
             s.league, s.market, s.name, s.position, s.team, s.team_name,
-            s.league_id, s.team_id
+            s.league_id, s.team_id, s.ppid
         );
     """
     with conn:
         cursor = conn.cursor()
+        cursor.execute("""
+            IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_player')
+               AND NOT EXISTS (
+                   SELECT 1 FROM sys.columns
+                   WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_player]') AND name = N'ppid'
+               )
+            BEGIN
+                ALTER TABLE [dbo].[prizepicks_player] ADD [ppid] [nvarchar](200) NULL;
+            END
+        """)
         cursor.execute(merge_sql)
         count = cursor.rowcount
     conn.close()
@@ -1287,6 +1498,8 @@ def main():
                 trusted_connection=trusted,
             )
             print(f"Upserted {merge_count} rows to prizepicks_projection ({history_count} archived on line change, {moved_count} moved to history for passed start_time, {deleted_count} deleted)")
+            pn = 0
+            p_merge = 0
             if player_records:
                 pn = insert_player_stage(
                     player_records,
@@ -1328,6 +1541,28 @@ def main():
                     trusted_connection=trusted,
                 )
                 print(f"Upserted {g_merge} rows to prizepicks_game")
+            else:
+                gn = 0
+                g_merge = 0
+
+            ref = parse_included_reference_records(resp)
+            ref_counts = insert_included_reference_stages(
+                ref,
+                server=args.db_server,
+                database="Props",
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Loaded included reference stages: {ref_counts}")
+            merge_included_reference_from_stage(
+                server=args.db_server,
+                database="Props",
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print("MergePrizepicksIncludedReferenceFromStage completed")
         except Exception as e:
             print(f"DB failed: {e}")
             import traceback
