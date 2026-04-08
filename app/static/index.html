@@ -218,8 +218,6 @@
   <script>
     const API = '';
     let currentProjections = [];
-    /** Full last-five streak data for all NBA (player, stat) from /api/projections/last-five. Used so modal merge has streak for every stat, not only rows on current grid page. */
-    var lastFiveByKey = {};
     var selectedLeagueId = '7';
     var LEAGUE_NAMES = { 2: 'MLB', 7: 'NBA', 8: 'NHL', 9: 'Football', 14: 'EPL', 15: 'CFB', 20: 'CBB', 82: 'Soccer' };
     var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
@@ -478,37 +476,6 @@
         status.textContent = '';
         wrap.classList.remove('loading');
         table.style.display = 'table';
-        var lastFiveQs = getSelectedLeagueIds().length ? '?league_ids=' + getSelectedLeagueIds().join(',') : '';
-        fetch(API + '/api/projections/last-five' + lastFiveQs)
-          .then(function (r) { return r.ok ? r.json() : []; })
-          .then(function (lastFiveList) {
-            if (!Array.isArray(lastFiveList)) return;
-            var byKey = {};
-            lastFiveList.forEach(function (item) {
-              var key = ((item.display_name || '').trim()) + '\n' + ((item.stat_type_name || '').trim());
-              byKey[key] = item;
-            });
-            lastFiveByKey = byKey;
-            if (!Array.isArray(currentProjections)) return;
-            currentProjections.forEach(function (r) {
-              var name = (r.display_name || r.pp_name || '').trim();
-              var stat = (r.stat_type_name || '').trim();
-              var key = name + '\n' + stat;
-              var last5 = byKey[key];
-              if (last5) {
-                r.favored = last5.favored;
-                r.risk = last5.risk;
-                r.cushion = last5.cushion;
-                r.last_n_values = last5.last_n_values;
-                r.last_n_dates = last5.last_n_dates;
-                r.last_n_opponents = last5.last_n_opponents;
-                r.last_n_projection_lines = last5.last_n_projection_lines;
-                r.streak_games = last5.streak_games;
-              }
-            });
-            renderTableFromCurrent();
-          })
-          .catch(function () {});
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
         wrap.classList.remove('loading');
@@ -519,21 +486,17 @@
 
     function mergeStreakFromGridIntoModalList(modalList) {
       if (!Array.isArray(modalList)) return false;
-      var byKey = lastFiveByKey && Object.keys(lastFiveByKey).length > 0
-        ? lastFiveByKey
-        : (function () {
-            var fallback = {};
-            if (!Array.isArray(currentProjections)) return fallback;
-            currentProjections.forEach(function (r) {
-              if (r.league_id == null || String(r.league_id) !== '7') return;
-              var name = (r.display_name || r.pp_name || '').trim();
-              var stat = (r.stat_type_name || '').trim();
-              var key = name + '\n' + stat;
-              if (key in fallback) return;
-              if (r.last_n_values && r.last_n_values.length > 0) fallback[key] = r;
-            });
-            return fallback;
-          })();
+      var byKey = {};
+      if (Array.isArray(currentProjections)) {
+        currentProjections.forEach(function (r) {
+          if (r.league_id == null || String(r.league_id) !== '7') return;
+          var name = (r.display_name || r.pp_name || '').trim();
+          var stat = (r.stat_type_name || '').trim();
+          var key = name + '\n' + stat;
+          if (key in byKey) return;
+          if (r.last_n_values && r.last_n_values.length > 0) byKey[key] = r;
+        });
+      }
       var merged = false;
       modalList.forEach(function (r) {
         var lid = r.league_id != null ? String(r.league_id) : '';
