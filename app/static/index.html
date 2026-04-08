@@ -104,7 +104,7 @@
 </head>
 <body>
   <div class="header-row">
-    <h1>PrizePicks Projections</h1>
+    <h1>Projections</h1>
     <div class="player-search-wrap">
       <input type="text" id="playerSearchInput" class="player-search-input" placeholder="Search players..." autocomplete="off" />
       <div id="playerSearchDropdown" class="player-search-dropdown" style="display: none;"></div>
@@ -112,14 +112,12 @@
   </div>
 
   <div class="section">
-    <h2>Sport (PrizePicks)</h2>
+    <h2>Sport</h2>
     <div class="filter-buttons" id="sportFilters"></div>
-    <p class="muted" style="font-size: 0.85rem; margin: 0.25rem 0 0 0;">Only one sport at a time. Options are based on active projections.</p>
-  </div>
+ </div>
 
   <div class="section">
     <h2>Stat</h2>
-    <p class="modal-stats-list-title" style="margin: 0 0 0.4rem 0;">Filter by stat type</p>
     <div id="mainStatList" class="modal-stats-list stat-filter-buttons filter-buttons"></div>
   </div>
 
@@ -218,6 +216,7 @@
   <script>
     const API = '';
     let currentProjections = [];
+    // Default sport on load
     var selectedLeagueId = '7';
     var LEAGUE_NAMES = { 2: 'MLB', 7: 'NBA', 8: 'NHL', 9: 'Football', 14: 'EPL', 15: 'CFB', 20: 'CBB', 82: 'Soccer' };
     var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
@@ -241,13 +240,15 @@
       if (!container) return;
       var leagues = getLeaguesFromProjections();
       var currentActive = container.querySelector('.filter-btn.active');
-      var currentValue = currentActive ? currentActive.getAttribute('data-league-id') : (selectedLeagueId != null ? String(selectedLeagueId) : null);
+      var currentValue = currentActive ? currentActive.getAttribute('data-league-id') : (selectedLeagueId != null ? String(selectedLeagueId) : '');
       var leagueIds = leagues.map(function (l) { return l.id; });
-      if (currentValue == null || leagueIds.indexOf(currentValue) < 0) {
-        currentValue = (leagueIds.indexOf('7') >= 0 ? '7' : (leagues.length > 0 ? leagues[0].id : null));
+      // Default to NBA (7) when available; otherwise first league with active projections.
+      if (!currentValue || leagueIds.indexOf(currentValue) < 0) {
+        currentValue = (leagueIds.indexOf('7') >= 0 ? '7' : (leagues.length > 0 ? leagues[0].id : ''));
       }
-      if (currentValue != null) selectedLeagueId = currentValue;
+      if (currentValue) selectedLeagueId = currentValue;
       container.innerHTML = '';
+
       leagues.forEach(function (league) {
         var btn = document.createElement('button');
         btn.type = 'button';
@@ -261,8 +262,11 @@
     function getSelectedLeagueIds() {
       var container = document.getElementById('sportFilters');
       var activeBtn = container && container.querySelector('.filter-btn.active');
-      if (activeBtn) return [activeBtn.getAttribute('data-league-id')];
-      if (selectedLeagueId != null) return [String(selectedLeagueId)];
+      if (activeBtn) {
+        var id = activeBtn.getAttribute('data-league-id');
+        return id ? [id] : [];
+      }
+      if (selectedLeagueId != null && String(selectedLeagueId)) return [String(selectedLeagueId)];
       return [7];
     }
 
@@ -307,8 +311,8 @@
       const params = new URLSearchParams();
       params.set('full_list', 'true');
       params.set('page_size', '0');
-      var leagueIds = getSelectedLeagueIds();
-      if (leagueIds && leagueIds.length > 0) params.set('league_ids', leagueIds.join(','));
+      // Always fetch all leagues so the UI can render a button for each active sport.
+      // Sport filtering is handled client-side via selectedLeagueId.
       return params;
     }
 
@@ -323,6 +327,7 @@
       var prevStat = getSelectedStat();
       var selectedLeagueIds = getSelectedLeagueIds();
       var list = (Array.isArray(currentProjections) ? currentProjections : []).filter(function (r) {
+        if (!selectedLeagueIds || selectedLeagueIds.length === 0) return true;
         var lid = r.league_id != null ? String(r.league_id) : '';
         return selectedLeagueIds.indexOf(lid) >= 0;
       });
@@ -392,6 +397,7 @@
       var filtered = Array.isArray(currentProjections) ? currentProjections : [];
       var selectedLeagueIds = getSelectedLeagueIds();
       filtered = filtered.filter(function (r) {
+        if (!selectedLeagueIds || selectedLeagueIds.length === 0) return true;
         var lid = r.league_id != null ? String(r.league_id) : '';
         return selectedLeagueIds.indexOf(lid) >= 0;
       });
@@ -956,10 +962,11 @@
     document.getElementById('pageSize').addEventListener('change', function () { currentPage = 1; renderTableFromCurrent(); });
     document.getElementById('sportFilters').addEventListener('click', function (e) {
       var btn = e.target && e.target.closest && e.target.closest('.filter-btn');
-      if (!btn || !btn.getAttribute('data-league-id')) return;
+      if (!btn || !btn.hasAttribute('data-league-id')) return;
       document.querySelectorAll('#sportFilters .filter-btn').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
-      selectedLeagueId = btn.getAttribute('data-league-id');
+      var lid = btn.getAttribute('data-league-id');
+      selectedLeagueId = lid ? lid : '7';
       currentPage = 1;
       updateMainStatList();
       renderTableFromCurrent();
