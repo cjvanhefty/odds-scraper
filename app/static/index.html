@@ -864,11 +864,12 @@
         if (!res.ok) throw new Error(data.detail || res.statusText);
         showUpdateMessage('Projections updated. ' + (data.log || '').slice(0, 200), false);
         loadLastUpdated();
-        loadProjections();
+        void loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
+      } finally {
+        btn.disabled = false;
       }
-      btn.disabled = false;
     }
 
     async function updateUnderdog() {
@@ -880,11 +881,12 @@
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok) throw new Error(data.detail || res.statusText);
         showUpdateMessage((data.message || 'Underdog updated.') + (data.log ? ' ' + (data.log + '').slice(0, 180) : ''), false);
-        loadProjections();
+        void loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
+      } finally {
+        btn.disabled = false;
       }
-      btn.disabled = false;
     }
 
     async function updateParlayPlay() {
@@ -897,11 +899,12 @@
         if (!res.ok) throw new Error(data.detail || res.statusText);
         var msg = (data.message || 'Parlay Play updated.') + (data.log ? ' ' + (data.log + '').slice(0, 180) : '');
         showUpdateMessage(msg, false);
-        loadProjections();
+        void loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
+      } finally {
+        btn.disabled = false;
       }
-      btn.disabled = false;
     }
 
     async function updateNbaStats() {

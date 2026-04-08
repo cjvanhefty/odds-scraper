@@ -8,11 +8,13 @@ import os
 import re
 import subprocess
 import sys
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Query, HTTPException, Body
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -167,22 +169,64 @@ _JOIN_STAT_ALNUM: dict[str, str] = {
 }
 
 
-def get_parlay_play_lines_by_match(conn) -> dict:
-    """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks."""
+def _parlay_slate_date_bounds(projections: list) -> tuple[str, str] | None:
+    """Min/max calendar dates from PrizePicks start_time, expanded ±1 day for TZ/slate edges."""
+    ds: list[date] = []
+    for p in projections:
+        st = p.get("start_time")
+        if not st:
+            continue
+        s = str(st).strip()
+        day = s[:10]
+        if len(day) != 10 or day[4] != "-" or day[7] != "-":
+            continue
+        try:
+            y, m, d = int(day[:4]), int(day[5:7]), int(day[8:10])
+            ds.append(date(y, m, d))
+        except ValueError:
+            continue
+    if not ds:
+        return None
+    lo, hi = min(ds), max(ds)
+    lo = lo - timedelta(days=1)
+    hi = hi + timedelta(days=1)
+    return (lo.isoformat(), hi.isoformat())
+
+
+def get_parlay_play_lines_by_match(
+    conn,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks.
+
+    When date_from/date_to are set (YYYY-MM-DD), only Parlay Play rows in that Central-date range are read.
+    When both are None, uses a rolling ~45-day window to avoid scanning the full history table.
+    """
     cursor = conn.cursor()
     try:
+        if date_from is None or date_to is None:
+            end = datetime.now(timezone.utc).date()
+            start = end - timedelta(days=45)
+            date_from = start.isoformat()
+            date_to = (end + timedelta(days=2)).isoformat()
         # Include alt lines: 3-PT attempts are often is_main_line=0 while sharing a parent "made threes" market.
         # ORDER BY is_main_line DESC so the first row per key is the main line when the same stat appears twice.
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT display_name, stat_type_name,
                    CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
                    line_score
             FROM [dbo].[parlay_play_projection]
             WHERE display_name IS NOT NULL AND stat_type_name IS NOT NULL
+              AND CONVERT(date, CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) >= ?
+              AND CONVERT(date, CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) <= ?
             ORDER BY display_name, stat_type_name,
                      CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120),
                      is_main_line DESC
-        """)
+            """,
+            (date_from, date_to),
+        )
         key_to_line = {}
         for row in cursor.fetchall():
             name = (row[0] or "").strip()
@@ -212,6 +256,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # Static files (frontend) - mount after routes so /api takes precedence
 STATIC_DIR = REPO_ROOT / "app" / "static"
@@ -379,7 +424,15 @@ def list_projections(
                 }
                 for p in projections
             ]
-        parlay_play_map = get_parlay_play_lines_by_match(conn)
+        if not projections:
+            parlay_play_map = {}
+        else:
+            slate_bounds = _parlay_slate_date_bounds(projections)
+            if slate_bounds:
+                d0, d1 = slate_bounds
+                parlay_play_map = get_parlay_play_lines_by_match(conn, date_from=d0, date_to=d1)
+            else:
+                parlay_play_map = get_parlay_play_lines_by_match(conn)
         out = []
         for r in projections:
             r = dict(r)

@@ -191,7 +191,45 @@ def get_projections(
             ELSE LTRIM(RTRIM(ud1.stat_type_name))
         END
     """
+    # Pre-aggregate Underdog lines once per (player key, game date, stat) instead of correlated OUTER APPLY
+    # (avoids O(n) repeated scans of underdog_projection; TOP 1 tie-break → ORDER BY line_score).
     sql = f"""
+        WITH ud_mapped_raw AS (
+            SELECT
+                up.underdog_player_id AS ud_player_id,
+                CONVERT(date, ud0.start_time) AS game_date,
+                {stat_join_expr_ud0} AS stat_norm,
+                ud0.line_score,
+                ROW_NUMBER() OVER (
+                    PARTITION BY up.underdog_player_id, CONVERT(date, ud0.start_time), ({stat_join_expr_ud0})
+                    ORDER BY ud0.line_score
+                ) AS rn
+            FROM [dbo].[underdog_projection] ud0
+            INNER JOIN [dbo].[underdog_appearance] ua ON ua.id = ud0.appearance_id
+            INNER JOIN [dbo].[underdog_player] up ON up.id = ua.player_id
+        ),
+        ud_mapped AS (
+            SELECT ud_player_id, game_date, stat_norm, line_score
+            FROM ud_mapped_raw
+            WHERE rn = 1
+        ),
+        ud_name_raw AS (
+            SELECT
+                LTRIM(RTRIM(ud1.display_name)) AS display_name,
+                CONVERT(date, ud1.start_time) AS game_date,
+                {stat_join_expr_ud1} AS stat_norm,
+                ud1.line_score,
+                ROW_NUMBER() OVER (
+                    PARTITION BY LTRIM(RTRIM(ud1.display_name)), CONVERT(date, ud1.start_time), ({stat_join_expr_ud1})
+                    ORDER BY ud1.line_score
+                ) AS rn
+            FROM [dbo].[underdog_projection] ud1
+        ),
+        ud_by_name AS (
+            SELECT display_name, game_date, stat_norm, line_score
+            FROM ud_name_raw
+            WHERE rn = 1
+        )
         SELECT
             p.projection_id,
             p.player_id AS pp_player_id,
@@ -212,28 +250,20 @@ def get_projections(
             pp.nba_player_id,
             g.away_abbreviation,
             g.home_abbreviation,
-            COALESCE(ud.line_score, ud_fb.line_score) AS line_underdog
+            COALESCE(ud.line_score, udf.line_score) AS line_underdog
         FROM [dbo].[prizepicks_projection] p
         INNER JOIN [dbo].[prizepicks_player] pp
             ON pp.player_id = CAST(p.player_id AS NVARCHAR(20))
         LEFT JOIN [dbo].[player] pl
             ON pl.prizepicks_player_id = TRY_CAST(pp.prizepicks_player_id AS INT)
-        OUTER APPLY (
-            SELECT TOP 1 ud0.line_score
-            FROM [dbo].[underdog_projection] ud0
-            INNER JOIN [dbo].[underdog_appearance] ua ON ua.id = ud0.appearance_id
-            INNER JOIN [dbo].[underdog_player] up ON up.id = ua.player_id
-            WHERE up.underdog_player_id = pl.underdog_player_id
-              AND {stat_join_expr_ud0} = {stat_join_expr_p}
-              AND CONVERT(date, ud0.start_time) = CONVERT(date, p.start_time)
-        ) ud
-        OUTER APPLY (
-            SELECT TOP 1 ud1.line_score
-            FROM [dbo].[underdog_projection] ud1
-            WHERE LTRIM(RTRIM(ud1.display_name)) = LTRIM(RTRIM(pp.display_name))
-              AND {stat_join_expr_ud1} = {stat_join_expr_p}
-              AND CONVERT(date, ud1.start_time) = CONVERT(date, p.start_time)
-        ) ud_fb
+        LEFT JOIN ud_mapped ud
+            ON ud.ud_player_id = pl.underdog_player_id
+            AND ud.stat_norm = ({stat_join_expr_p})
+            AND ud.game_date = CONVERT(date, p.start_time)
+        LEFT JOIN ud_by_name udf
+            ON udf.display_name = LTRIM(RTRIM(pp.display_name))
+            AND udf.stat_norm = ({stat_join_expr_p})
+            AND udf.game_date = CONVERT(date, p.start_time)
         LEFT JOIN [dbo].[prizepicks_game] g
             ON g.game_id = CAST(p.game_id AS NVARCHAR(20))
         WHERE {where_sql}
