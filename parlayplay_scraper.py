@@ -178,6 +178,25 @@ STAT_NORMALIZE = {
     "ptsrebast": "Pts+Rebs+Asts",
     "rebast": "Rebs+Asts",
     "fantasypoints": "Fantasy Score",
+    # ParlayPlay `challenge_option` values from dbo.parlay_play_stat_type (bb_*).
+    # These should normalize to the same canonical labels used across providers.
+    "bbpoints": "Points",
+    "bbrebounds": "Rebounds",
+    "bbassists": "Assists",
+    "bbsteals": "Steals",
+    "bbblocks": "Blocks",
+    "bbdreb": "Defensive Rebounds",
+    "bboreb": "Offensive Rebounds",
+    "bbfgmade": "FG Made",
+    "bbfreethrowsmade": "Free Throws Made",
+    "bbparlaypoints": "Fantasy Score",
+    "bbptsast": "Pts+Asts",
+    "bbptsreb": "Pts+Rebs",
+    "bbptsrebast": "Pts+Rebs+Asts",
+    "bbrebast": "Rebs+Asts",
+    "bbdd": "Double Doubles",
+    "bbtd": "Triple Doubles",
+    "bbfirstbasket": "First Point Scorer",
 }
 
 
@@ -1392,7 +1411,7 @@ def fetch_with_playwright(
     connect_url: str | None = None,
     headed: bool = False,
     debug: bool = False,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """Load Parlay Play in browser and capture API responses. Returns parsed records or [].
     Use user_data_dir for persistent profile (login saved), or connect_url to attach to existing browser.
     Use debug=True to capture every JSON response from parlayplay URLs."""
@@ -1590,7 +1609,7 @@ def main():
         path = "parlayplay_captured.json"
         if args.user_data_dir:
             print(f"Using profile: {args.user_data_dir}")
-        records = fetch_with_playwright(
+        records, etl_bodies = fetch_with_playwright(
             save_path=path,
             user_data_dir=args.user_data_dir,
             connect_url=args.connect,

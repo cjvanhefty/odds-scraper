@@ -154,7 +154,7 @@ _JOIN_STAT_ALNUM: dict[str, str] = {
     "bbfreethrowsmade": "Free Throws Made",
     "bbfreethrowsattempted": "Free Throws Attempted",
     "bbparlaypoints": "Fantasy Score",
-    "bbfirstbasket": "First Basket",
+    "bbfirstbasket": "First Point Scorer",
     # MLB bab_* codes
     "babhrr": "Hits + Runs + RBIs",
     "babrbi": "RBIs",
