@@ -37,11 +37,11 @@ BEGIN
             [stat_type_name] = s.[stat_type_name],
             [display_stat] = s.[display_stat],
             [stat] = s.[stat],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [pickem_stat_id], [stat_type_name], [display_stat], [stat], [last_modified_at]
         ) VALUES (
-            s.[pickem_stat_id], s.[stat_type_name], s.[display_stat], s.[stat], GETUTCDATE()
+            s.[pickem_stat_id], s.[stat_type_name], s.[display_stat], s.[stat], GETDATE()
         );
     END
 
@@ -124,7 +124,7 @@ BEGIN
             [title_suffix] = s.[title_suffix],
             [manually_created] = s.[manually_created],
             [pre_game_data] = s.[pre_game_data],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [id], [scheduled_at], [home_team_id], [away_team_id],
             [title], [short_title], [abbreviated_title], [full_team_names_title],
@@ -138,7 +138,7 @@ BEGIN
             s.[status], s.[sport_id], s.[type], s.[period], s.[match_progress],
             s.[away_team_score], s.[home_team_score], s.[rank], s.[year], s.[season_type],
             s.[updated_at], s.[rescheduled_from], s.[title_suffix], s.[manually_created],
-            s.[pre_game_data], GETUTCDATE()
+            s.[pre_game_data], GETDATE()
         );
     END
 
@@ -176,7 +176,7 @@ BEGIN
             [light_image_url] = s.[light_image_url],
             [action_path] = s.[action_path],
             [country] = s.[country],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [id], [first_name], [last_name], [position_display_name], [position_id],
             [position_name], [team_id], [sport_id], [jersey_number], [image_url],
@@ -184,7 +184,7 @@ BEGIN
         ) VALUES (
             s.[id], s.[first_name], s.[last_name], s.[position_display_name], s.[position_id],
             s.[position_name], s.[team_id], s.[sport_id], s.[jersey_number], s.[image_url],
-            s.[dark_image_url], s.[light_image_url], s.[action_path], s.[country], GETUTCDATE()
+            s.[dark_image_url], s.[light_image_url], s.[action_path], s.[country], GETDATE()
         );
     END
 
@@ -258,7 +258,7 @@ BEGIN
             [manually_created] = s.[manually_created],
             [sport_tournament_round_id] = s.[sport_tournament_round_id],
             [pre_game_data] = s.[pre_game_data],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [id], [scheduled_at], [home_player_id], [away_player_id],
             [title], [short_title], [abbreviated_title], [full_title],
@@ -272,7 +272,7 @@ BEGIN
             s.[status], s.[sport_id], s.[type], s.[competition_id], s.[rank],
             s.[period], s.[match_progress], s.[score], s.[updated_at],
             s.[manually_created], s.[sport_tournament_round_id], s.[pre_game_data],
-            GETUTCDATE()
+            GETDATE()
         );
     END
 
@@ -302,7 +302,7 @@ BEGIN
             [sort_by] = s.[sort_by],
             [multiple_picks_allowed] = s.[multiple_picks_allowed],
             [type] = s.[type],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [id], [player_id], [match_id], [match_type], [team_id],
             [position_id], [lineup_status_id], [sort_by],
@@ -310,7 +310,7 @@ BEGIN
         ) VALUES (
             s.[id], s.[player_id], s.[match_id], s.[match_type], s.[team_id],
             s.[position_id], s.[lineup_status_id], s.[sort_by],
-            s.[multiple_picks_allowed], s.[type], GETUTCDATE()
+            s.[multiple_picks_allowed], s.[type], GETDATE()
         );
     END
 END
