@@ -11,7 +11,7 @@ CREATE TABLE [dbo].[parlay_play_sport](
 	[symbol] [nvarchar](500) NULL,
 	[illustration] [nvarchar](500) NULL,
 	[popularity] [nvarchar](20) NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_parlay_play_sport] PRIMARY KEY CLUSTERED ([id] ASC)
 ) ON [PRIMARY]
 END

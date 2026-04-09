@@ -123,15 +123,20 @@
 
   <div class="section">
     <h2>Update data</h2>
-    <div class="controls">
-      <button type="button" class="btn" id="btnUpdateProjections">Update PrizePicks</button>
-      <span id="lastUpdatedWrap" class="muted" style="margin-left: 0.75rem; font-size: 0.9rem;">Last updated: <span id="lastUpdatedText">—</span></span>
-      <button type="button" class="btn secondary" id="btnUpdateUnderdog">Update Underdog</button>
-      <button type="button" class="btn secondary" id="btnUpdateParlayPlay">Update Parlay Play</button>
-      <span style="margin-left: 1rem;"></span>
-      <label>From: <input type="date" id="dateFrom" /></label>
-      <label>To: <input type="date" id="dateTo" /></label>
-      <button type="button" class="btn secondary" id="btnUpdateNbaStats">Update NBA stats</button>
+    <div class="controls" style="justify-content: space-between;">
+      <div class="controls" style="margin: 0; gap: 0.75rem;">
+        <button type="button" class="btn" id="btnUpdateProjections">Update PrizePicks</button>
+        <button type="button" class="btn secondary" id="btnUpdateUnderdog">Update Underdog</button>
+        <button type="button" class="btn secondary" id="btnUpdateParlayPlay">Update Parlay Play</button>
+      </div>
+      <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;">
+        <div class="muted" style="font-size: 0.9rem;">NBA stats updated: <span id="nbaStatsLastUpdatedText">—</span></div>
+        <div class="controls" style="margin: 0; gap: 0.75rem; justify-content: flex-end;">
+        <label>From: <input type="date" id="dateFrom" /></label>
+        <label>To: <input type="date" id="dateTo" /></label>
+        <button type="button" class="btn secondary" id="btnUpdateNbaStats">Update NBA stats</button>
+        </div>
+      </div>
     </div>
     <div id="updateMessage"></div>
   </div>
@@ -155,9 +160,18 @@
             <th>Opponent</th>
             <th>H/A</th>
             <th>Stat</th>
-            <th>PrizePicks</th>
-            <th>Underdog</th>
-            <th>Parlay Play</th>
+            <th style="text-align: left; vertical-align: bottom; line-height: 1.25;">
+              <div>PrizePicks</div>
+              <div style="font-size: 0.75rem; font-weight: 400; opacity: 0.85; margin-top: 0.15rem;">Updated <span id="lastUpdatedText">—</span></div>
+            </th>
+            <th style="text-align: left; vertical-align: bottom; line-height: 1.25;">
+              <div>Underdog</div>
+              <div style="font-size: 0.75rem; font-weight: 400; opacity: 0.85; margin-top: 0.15rem;">Updated <span id="underdogLastUpdatedText">—</span></div>
+            </th>
+            <th style="text-align: left; vertical-align: bottom; line-height: 1.25;">
+              <div>Parlay Play</div>
+              <div style="font-size: 0.75rem; font-weight: 400; opacity: 0.85; margin-top: 0.15rem;">Updated <span id="parlayPlayLastUpdatedText">—</span></div>
+            </th>
             <th>Risk</th>
             <th>Favored</th>
           </tr>
@@ -887,6 +901,7 @@
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok) throw new Error(data.detail || res.statusText);
         showUpdateMessage((data.message || 'Underdog updated.') + (data.log ? ' ' + (data.log + '').slice(0, 180) : ''), false);
+        loadLastUpdated();
         void loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
@@ -905,6 +920,7 @@
         if (!res.ok) throw new Error(data.detail || res.statusText);
         var msg = (data.message || 'Parlay Play updated.') + (data.log ? ' ' + (data.log + '').slice(0, 180) : '');
         showUpdateMessage(msg, false);
+        loadLastUpdated();
         void loadProjections();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
@@ -936,6 +952,7 @@
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok) throw new Error(data.detail || res.statusText);
         showUpdateMessage('NBA stats updated. ' + (data.log || '').slice(0, 200), false);
+        loadLastUpdated();
       } catch (e) {
         showUpdateMessage('Failed: ' + e.message, true);
       }
@@ -946,15 +963,27 @@
       try {
         const res = await fetch(API + '/api/projections/last-updated');
         const data = await res.json().catch(function () { return {}; });
-        const el = document.getElementById('lastUpdatedText');
-        if (data.last_updated) {
-          const d = new Date(data.last_updated);
-          el.textContent = d.toLocaleString();
-        } else {
-          el.textContent = 'Never';
+        function setLastUpdated(id, val) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          if (val) {
+            el.textContent = new Date(val).toLocaleString();
+          } else {
+            el.textContent = 'Never';
+          }
         }
+        setLastUpdated('lastUpdatedText', data.last_updated);
+        setLastUpdated('underdogLastUpdatedText', data.underdog_last_updated);
+        setLastUpdated('parlayPlayLastUpdatedText', data.parlay_play_last_updated);
+        setLastUpdated('nbaStatsLastUpdatedText', data.nba_stats_last_updated);
       } catch (e) {
         document.getElementById('lastUpdatedText').textContent = '—';
+        var udEl = document.getElementById('underdogLastUpdatedText');
+        if (udEl) udEl.textContent = '—';
+        var ppEl = document.getElementById('parlayPlayLastUpdatedText');
+        if (ppEl) ppEl.textContent = '—';
+        var nbaEl = document.getElementById('nbaStatsLastUpdatedText');
+        if (nbaEl) nbaEl.textContent = '—';
       }
     }
 

@@ -17,7 +17,7 @@ CREATE TABLE [dbo].[parlay_play_player](
 	[gender] [nvarchar](10) NULL,
 	[popularity] [nvarchar](20) NULL,
 	[show_alt_lines] [bit] NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_parlay_play_player] PRIMARY KEY CLUSTERED ([id] ASC),
 	CONSTRAINT [FK_parlay_play_player_sport] FOREIGN KEY ([sport_id]) REFERENCES [dbo].[parlay_play_sport] ([id]),
 	CONSTRAINT [FK_parlay_play_player_team] FOREIGN KEY ([team_id]) REFERENCES [dbo].[parlay_play_team] ([id])

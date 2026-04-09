@@ -424,7 +424,7 @@ def upsert_underdog_from_stage(
         p.pickem_stat_id,
         p.appearance_stat_rank,
         p.options,
-        SYSUTCDATETIME() AS created_at,
+        CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time') AS created_at,
         p.last_modified_at
     FROM [dbo].[underdog_projection] p
     INNER JOIN [dbo].[underdog_projection_stage] s
@@ -443,7 +443,7 @@ def upsert_underdog_from_stage(
     """
 
     move_expired_sql = """
-    DECLARE @nowChicago datetime2(3) = CONVERT(datetime2(3), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
+    DECLARE @nowChicago datetime2(7) = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
 
     INSERT INTO [dbo].[underdog_projection_history] (
         projection_id, display_name, stat_type_name, line_score, start_time,
@@ -575,7 +575,7 @@ def upsert_underdog_from_stage(
             p.pickem_stat_id,
             p.appearance_stat_rank,
             p.options,
-            SYSUTCDATETIME() AS created_at,
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time') AS created_at,
             p.last_modified_at
         FROM [dbo].[underdog_projection] p
         WHERE NOT EXISTS (
@@ -688,7 +688,7 @@ def upsert_underdog_from_stage(
             p.pickem_stat_id,
             p.appearance_stat_rank,
             p.options,
-            SYSUTCDATETIME() AS created_at,
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time') AS created_at,
             p.last_modified_at
         FROM [dbo].[underdog_projection] p
         INNER JOIN #underdog_stage_dupes d
@@ -755,7 +755,7 @@ def upsert_underdog_from_stage(
         pickem_stat_id = s.pickem_stat_id,
         appearance_stat_rank = s.appearance_stat_rank,
         options = s.options,
-        last_modified_at = GETUTCDATE()
+        last_modified_at = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
     WHEN NOT MATCHED BY TARGET
       THEN INSERT (
         projection_id, display_name, stat_type_name, line_score, start_time,
@@ -779,7 +779,7 @@ def upsert_underdog_from_stage(
         s.ou_grid_display_title, s.ou_has_alternates, s.ou_option_priority,
         s.ou_prediction_market, s.ou_scoring_type_id, s.ou_team_divider,
         s.appearance_stat_id, s.appearance_id, s.display_stat, s.stat, s.graded_by,
-        s.pickem_stat_id, s.appearance_stat_rank, s.options, GETUTCDATE()
+        s.pickem_stat_id, s.appearance_stat_rank, s.options, CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
       )
     ;
     """
@@ -847,7 +847,7 @@ def upsert_underdog_player_from_stage(
         t.light_image_url = s.light_image_url,
         t.action_path = s.action_path,
         t.country = s.country,
-        t.last_modified_at = GETUTCDATE()
+        t.last_modified_at = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
     WHEN NOT MATCHED BY TARGET THEN
       INSERT (
         id, first_name, last_name, position_display_name, position_id,
@@ -857,7 +857,7 @@ def upsert_underdog_player_from_stage(
       VALUES (
         s.id, s.first_name, s.last_name, s.position_display_name, s.position_id,
         s.position_name, s.team_id, s.sport_id, s.jersey_number, s.image_url,
-        s.dark_image_url, s.light_image_url, s.action_path, s.country, GETUTCDATE()
+        s.dark_image_url, s.light_image_url, s.action_path, s.country, CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'))
       );
     """
     with conn:
@@ -897,10 +897,10 @@ def upsert_underdog_stat_type_from_stage(
         t.stat_type_name = s.stat_type_name,
         t.display_stat = s.display_stat,
         t.stat = s.stat,
-        t.last_modified_at = GETUTCDATE()
+        t.last_modified_at = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
     WHEN NOT MATCHED BY TARGET THEN
       INSERT (pickem_stat_id, stat_type_name, display_stat, stat, last_modified_at)
-      VALUES (s.pickem_stat_id, s.stat_type_name, s.display_stat, s.stat, GETUTCDATE());
+      VALUES (s.pickem_stat_id, s.stat_type_name, s.display_stat, s.stat, CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
     """
     with conn:
         cursor = conn.cursor()
@@ -941,7 +941,7 @@ def upsert_underdog_appearance_from_stage(
         t.sort_by = s.sort_by,
         t.multiple_picks_allowed = s.multiple_picks_allowed,
         t.type = s.type,
-        t.last_modified_at = GETUTCDATE()
+        t.last_modified_at = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
     WHEN NOT MATCHED BY TARGET THEN
       INSERT (
         id, player_id, match_id, match_type, team_id,
@@ -951,7 +951,7 @@ def upsert_underdog_appearance_from_stage(
       VALUES (
         s.id, s.player_id, s.match_id, s.match_type, s.team_id,
         s.position_id, s.lineup_status_id, s.sort_by,
-        s.multiple_picks_allowed, s.type, GETUTCDATE()
+        s.multiple_picks_allowed, s.type, CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
       );
     """
     with conn:
@@ -1006,7 +1006,7 @@ def upsert_underdog_game_from_stage(
         t.title_suffix = s.title_suffix,
         t.manually_created = s.manually_created,
         t.pre_game_data = s.pre_game_data,
-        t.last_modified_at = GETUTCDATE()
+        t.last_modified_at = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
     WHEN NOT MATCHED BY TARGET THEN
       INSERT (
         id, scheduled_at, home_team_id, away_team_id,
@@ -1022,7 +1022,7 @@ def upsert_underdog_game_from_stage(
         s.status, s.sport_id, s.type, s.period, s.match_progress,
         s.away_team_score, s.home_team_score, s.rank, s.year, s.season_type,
         s.updated_at, s.rescheduled_from, s.title_suffix, s.manually_created,
-        s.pre_game_data, GETUTCDATE()
+        s.pre_game_data, CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
       );
     """
     with conn:
@@ -1074,7 +1074,7 @@ def upsert_underdog_solo_game_from_stage(
         t.manually_created = s.manually_created,
         t.sport_tournament_round_id = s.sport_tournament_round_id,
         t.pre_game_data = s.pre_game_data,
-        t.last_modified_at = GETUTCDATE()
+        t.last_modified_at = CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
     WHEN NOT MATCHED BY TARGET THEN
       INSERT (
         id, scheduled_at, home_player_id, away_player_id,
@@ -1090,7 +1090,7 @@ def upsert_underdog_solo_game_from_stage(
         s.status, s.sport_id, s.type, s.competition_id, s.rank,
         s.period, s.match_progress, s.score, s.updated_at,
         s.manually_created, s.sport_tournament_round_id, s.pre_game_data,
-        GETUTCDATE()
+        CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
       );
     """
     with conn:

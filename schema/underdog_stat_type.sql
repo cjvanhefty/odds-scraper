@@ -13,7 +13,7 @@ CREATE TABLE [dbo].[underdog_stat_type](
 	[stat_type_name] [nvarchar](100) NOT NULL,
 	[display_stat] [nvarchar](200) NULL,
 	[stat] [nvarchar](200) NULL,
-	[last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_underdog_stat_type_last_modified_at] DEFAULT (GETUTCDATE()),
+	[last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_underdog_stat_type_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_underdog_stat_type] PRIMARY KEY CLUSTERED ([underdog_stat_type_id] ASC),
 	CONSTRAINT [UQ_underdog_stat_type_pickem_stat_id] UNIQUE ([pickem_stat_id] ASC)
 ) ON [PRIMARY]

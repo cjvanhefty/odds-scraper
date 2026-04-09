@@ -58,7 +58,7 @@ BEGIN
         [rank] [int] NULL,
         [show_trending] [bit] NULL,
         [projection_filters_json] [nvarchar](max) NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_league_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_league_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_league] PRIMARY KEY CLUSTERED ([league_id] ASC)
     ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
 END
@@ -91,7 +91,7 @@ BEGIN
         [primary_color] [nvarchar](20) NULL,
         [secondary_color] [nvarchar](20) NULL,
         [tertiary_color] [nvarchar](20) NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_team_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_team_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_team] PRIMARY KEY CLUSTERED ([team_id] ASC)
     ) ON [PRIMARY]
 END
@@ -118,7 +118,7 @@ BEGIN
         [name] [nvarchar](200) NOT NULL,
         [rank] [int] NULL,
         [lfg_ignored_leagues_json] [nvarchar](max) NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_stat_type_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_stat_type_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_stat_type] PRIMARY KEY CLUSTERED ([stat_type_id] ASC)
     ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
 END
@@ -141,7 +141,7 @@ BEGIN
     CREATE TABLE [dbo].[prizepicks_duration](
         [duration_id] [nvarchar](20) NOT NULL,
         [name] [nvarchar](100) NOT NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_duration_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_duration_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_duration] PRIMARY KEY CLUSTERED ([duration_id] ASC)
     ) ON [PRIMARY]
 END
@@ -164,7 +164,7 @@ BEGIN
     CREATE TABLE [dbo].[prizepicks_projection_type](
         [projection_type_id] [nvarchar](20) NOT NULL,
         [name] [nvarchar](100) NOT NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_projection_type_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_projection_type_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_projection_type] PRIMARY KEY CLUSTERED ([projection_type_id] ASC)
     ) ON [PRIMARY]
 END
@@ -267,7 +267,7 @@ BEGIN
         [projections_count] [int] NULL,
         [show_trending] [bit] NULL,
         [metadata_json] [nvarchar](max) NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_game_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_game_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_game] PRIMARY KEY CLUSTERED ([game_id] ASC)
     ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
 END
@@ -315,7 +315,7 @@ BEGIN
         [league_id] [nvarchar](20) NULL,
         [team_id] [nvarchar](20) NULL,
         [ppid] [nvarchar](200) NULL,
-        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_player_last_modified_at] DEFAULT (GETUTCDATE()),
+        [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_player_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
         CONSTRAINT [PK_prizepicks_player] PRIMARY KEY CLUSTERED ([player_id] ASC)
     ) ON [PRIMARY]
 END
@@ -339,7 +339,7 @@ GO
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_player' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_player]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_player] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_player_last_modified_at_existing] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_player] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_player_last_modified_at_existing] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
@@ -361,7 +361,7 @@ GO
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_game' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_game]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_game] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_game_last_modified_at_existing] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_game] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_game_last_modified_at_existing] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
@@ -369,35 +369,35 @@ GO
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_league' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_league]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_league] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_league_lma] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_league] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_league_lma] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_team' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_team]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_team] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_team_lma] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_team] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_team_lma] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_stat_type' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_stat_type]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_stat_type] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_stat_type_lma] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_stat_type] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_stat_type_lma] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_duration' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_duration]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_duration] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_duration_lma] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_duration] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_duration_lma] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_projection_type' AND schema_id = SCHEMA_ID('dbo'))
    AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[prizepicks_projection_type]') AND name = N'last_modified_at')
 BEGIN
-    ALTER TABLE [dbo].[prizepicks_projection_type] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_projection_type_lma] DEFAULT (GETUTCDATE());
+    ALTER TABLE [dbo].[prizepicks_projection_type] ADD [last_modified_at] [datetime2](7) NOT NULL CONSTRAINT [DF_prizepicks_projection_type_lma] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
 END
 GO
 
@@ -445,7 +445,7 @@ BEGIN
         [rank] = s.[rank],
         [show_trending] = s.[show_trending],
         [projection_filters_json] = s.[projection_filters_json],
-        [last_modified_at] = GETUTCDATE()
+        [last_modified_at] = GETDATE()
     WHEN NOT MATCHED BY TARGET THEN INSERT (
         [league_id], [active], [f2p_enabled], [has_live_projections], [icon], [image_url], [last_five_games_enabled],
         [league_icon_id], [name], [parent_id], [parent_name], [projections_count], [rank], [show_trending],
@@ -453,7 +453,7 @@ BEGIN
     ) VALUES (
         s.[league_id], s.[active], s.[f2p_enabled], s.[has_live_projections], s.[icon], s.[image_url], s.[last_five_games_enabled],
         s.[league_icon_id], s.[name], s.[parent_id], s.[parent_name], s.[projections_count], s.[rank], s.[show_trending],
-        s.[projection_filters_json], GETUTCDATE()
+        s.[projection_filters_json], GETDATE()
     );
 
     ;MERGE [dbo].[prizepicks_projection_type] AS t
@@ -462,9 +462,9 @@ BEGIN
         (t.[name] = s.[name] OR (t.[name] IS NULL AND s.[name] IS NULL))
     ) THEN UPDATE SET
         [name] = s.[name],
-        [last_modified_at] = GETUTCDATE()
+        [last_modified_at] = GETDATE()
     WHEN NOT MATCHED BY TARGET THEN INSERT ([projection_type_id], [name], [last_modified_at])
-    VALUES (s.[projection_type_id], s.[name], GETUTCDATE());
+    VALUES (s.[projection_type_id], s.[name], GETDATE());
 
     ;MERGE [dbo].[prizepicks_duration] AS t
     USING [dbo].[prizepicks_duration_stage] AS s ON t.[duration_id] = s.[duration_id]
@@ -472,9 +472,9 @@ BEGIN
         (t.[name] = s.[name] OR (t.[name] IS NULL AND s.[name] IS NULL))
     ) THEN UPDATE SET
         [name] = s.[name],
-        [last_modified_at] = GETUTCDATE()
+        [last_modified_at] = GETDATE()
     WHEN NOT MATCHED BY TARGET THEN INSERT ([duration_id], [name], [last_modified_at])
-    VALUES (s.[duration_id], s.[name], GETUTCDATE());
+    VALUES (s.[duration_id], s.[name], GETDATE());
 
     ;MERGE [dbo].[prizepicks_team] AS t
     USING [dbo].[prizepicks_team_stage] AS s ON t.[team_id] = s.[team_id]
@@ -492,11 +492,11 @@ BEGIN
         [primary_color] = s.[primary_color],
         [secondary_color] = s.[secondary_color],
         [tertiary_color] = s.[tertiary_color],
-        [last_modified_at] = GETUTCDATE()
+        [last_modified_at] = GETDATE()
     WHEN NOT MATCHED BY TARGET THEN INSERT (
         [team_id], [abbreviation], [market], [name], [primary_color], [secondary_color], [tertiary_color], [last_modified_at]
     ) VALUES (
-        s.[team_id], s.[abbreviation], s.[market], s.[name], s.[primary_color], s.[secondary_color], s.[tertiary_color], GETUTCDATE()
+        s.[team_id], s.[abbreviation], s.[market], s.[name], s.[primary_color], s.[secondary_color], s.[tertiary_color], GETDATE()
     );
 
     ;MERGE [dbo].[prizepicks_stat_type] AS t
@@ -509,11 +509,11 @@ BEGIN
         [name] = s.[name],
         [rank] = s.[rank],
         [lfg_ignored_leagues_json] = s.[lfg_ignored_leagues_json],
-        [last_modified_at] = GETUTCDATE()
+        [last_modified_at] = GETDATE()
     WHEN NOT MATCHED BY TARGET THEN INSERT (
         [stat_type_id], [name], [rank], [lfg_ignored_leagues_json], [last_modified_at]
     ) VALUES (
-        s.[stat_type_id], s.[name], s.[rank], s.[lfg_ignored_leagues_json], GETUTCDATE()
+        s.[stat_type_id], s.[name], s.[rank], s.[lfg_ignored_leagues_json], GETDATE()
     );
 
     ;MERGE [dbo].[prizepicks_game] AS t
@@ -564,7 +564,7 @@ BEGIN
         [position] = s.[position], [team] = s.[team], [team_name] = s.[team_name], [active] = s.[active], [f2p_enabled] = s.[f2p_enabled],
         [has_live_projections] = s.[has_live_projections], [icon] = s.[icon], [last_five_games_enabled] = s.[last_five_games_enabled],
         [league_icon_id] = s.[league_icon_id], [parent_id] = s.[parent_id], [parent_name] = s.[parent_name], [projections_count] = s.[projections_count],
-        [show_trending] = s.[show_trending], [metadata_json] = s.[metadata_json], [last_modified_at] = GETUTCDATE()
+        [show_trending] = s.[show_trending], [metadata_json] = s.[metadata_json], [last_modified_at] = GETDATE()
     WHEN NOT MATCHED BY TARGET THEN INSERT (
         [game_id], [external_game_id], [created_at], [end_time], [start_time], [updated_at], [is_live], [status], [away_team_id], [home_team_id],
         [league_name], [metadata_status], [away_abbreviation], [home_abbreviation], [abbreviation], [market], [name], [primary_color], [secondary_color],
@@ -576,7 +576,7 @@ BEGIN
         s.[league_name], s.[metadata_status], s.[away_abbreviation], s.[home_abbreviation], s.[abbreviation], s.[market], s.[name], s.[primary_color], s.[secondary_color],
         s.[tertiary_color], s.[lfg_ignored_leagues], s.[rank], s.[combo], s.[display_name], s.[image_url], s.[jersey_number], s.[league], s.[league_id], s.[position], s.[team],
         s.[team_name], s.[active], s.[f2p_enabled], s.[has_live_projections], s.[icon], s.[last_five_games_enabled], s.[league_icon_id], s.[parent_id], s.[parent_name],
-        s.[projections_count], s.[show_trending], s.[metadata_json], GETUTCDATE()
+        s.[projections_count], s.[show_trending], s.[metadata_json], GETDATE()
     );
 
     IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'prizepicks_player_stage' AND schema_id = SCHEMA_ID('dbo'))
@@ -601,13 +601,13 @@ BEGIN
         ) THEN UPDATE SET
             [combo] = s.[combo], [display_name] = s.[display_name], [image_url] = s.[image_url], [jersey_number] = s.[jersey_number],
             [league] = s.[league], [market] = s.[market], [name] = s.[name], [position] = s.[position], [team] = s.[team], [team_name] = s.[team_name],
-            [league_id] = s.[league_id], [team_id] = s.[team_id], [ppid] = s.[ppid], [last_modified_at] = GETUTCDATE()
+            [league_id] = s.[league_id], [team_id] = s.[team_id], [ppid] = s.[ppid], [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [player_id], [combo], [display_name], [image_url], [jersey_number], [league], [market], [name], [position], [team], [team_name],
             [league_id], [team_id], [ppid], [last_modified_at]
         ) VALUES (
             s.[player_id], s.[combo], s.[display_name], s.[image_url], s.[jersey_number], s.[league], s.[market], s.[name], s.[position], s.[team], s.[team_name],
-            s.[league_id], s.[team_id], s.[ppid], GETUTCDATE()
+            s.[league_id], s.[team_id], s.[ppid], GETDATE()
         );
     END
 END

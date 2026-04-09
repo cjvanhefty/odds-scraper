@@ -612,23 +612,46 @@ def list_players(
 
 @app.get("/api/projections/last-updated")
 def get_projections_last_updated():
-    """Return the most recent last_modified_at for PrizePicks projections (when they were last updated)."""
+    """Return the most recent last_modified_at timestamps (PrizePicks, Underdog, Parlay Play, NBA player_stat)."""
     conn = None
     try:
         conn = get_conn()
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT MAX(last_modified_at) AS last_updated FROM [dbo].[prizepicks_projection]"
-        )
+        cursor.execute("""
+            SELECT
+                (SELECT MAX(last_modified_at) FROM [dbo].[prizepicks_projection]) AS last_updated,
+                (SELECT MAX(last_modified_at) FROM [dbo].[underdog_projection]) AS underdog_last_updated,
+                (SELECT MAX(last_modified_at) FROM [dbo].[parlay_play_projection]) AS parlay_play_last_updated,
+                (SELECT MAX(last_modified_at) FROM [dbo].[player_stat]) AS nba_stats_last_updated
+        """)
         row = cursor.fetchone()
         cursor.close()
-        if row and row[0] is not None:
-            # Return ISO format for the frontend
-            val = row[0]
+
+        def _serialize_dt(val):
+            if val is None:
+                return None
+            # These timestamps are persisted in America/Chicago (datetime2) for display.
+            # Keep them tz-naive so the frontend displays the stored value as-is.
+            if isinstance(val, datetime):
+                return val.replace(tzinfo=None).isoformat()
             if hasattr(val, "isoformat"):
-                return {"last_updated": val.isoformat()}
-            return {"last_updated": str(val)}
-        return {"last_updated": None}
+                return val.isoformat()
+            return str(val)
+
+        if not row:
+            return {
+                "last_updated": None,
+                "underdog_last_updated": None,
+                "parlay_play_last_updated": None,
+                "nba_stats_last_updated": None,
+            }
+
+        return {
+            "last_updated": _serialize_dt(row[0]),
+            "underdog_last_updated": _serialize_dt(row[1]),
+            "parlay_play_last_updated": _serialize_dt(row[2]),
+            "nba_stats_last_updated": _serialize_dt(row[3]),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
