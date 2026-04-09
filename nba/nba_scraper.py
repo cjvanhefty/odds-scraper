@@ -378,7 +378,22 @@ def upsert_player_stat_from_stage(
 
     conn = _get_db_conn(server, database, user, password, trusted_connection)
 
-    merge_sql = """
+    now_chicago_expr = "CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')"
+
+    def _ensure_player_stat_last_modified_at(cursor) -> None:
+        # Add last_modified_at if missing, so we can show "Last updated" for NBA stats in the UI.
+        cursor.execute(
+            """
+            IF COL_LENGTH(N'dbo.player_stat', N'last_modified_at') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[player_stat]
+                ADD [last_modified_at] [datetime2](7) NOT NULL
+                    CONSTRAINT [DF_player_stat_last_modified_at] DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'));
+            END
+            """
+        )
+
+    merge_sql = f"""
         MERGE [dbo].[player_stat] AS t
         USING [dbo].[player_stat_stage] AS s
         ON t.player_id = s.player_id AND t.game_id = s.game_id
@@ -407,21 +422,23 @@ def upsert_player_stat_from_stage(
             t.pf = s.pf,
             t.pts = s.pts,
             t.plus_minus = s.plus_minus,
-            t.video_available = s.video_available
+            t.video_available = s.video_available,
+            t.last_modified_at = {now_chicago_expr}
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             season_id, player_id, game_id, game_date, matchup, wl,
             [min], fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
             ftm, fta, ft_pct, oreb, dreb, reb, ast, stl, blk,
-            tov, pf, pts, plus_minus, video_available
+            tov, pf, pts, plus_minus, video_available, last_modified_at
         ) VALUES (
             s.season_id, s.player_id, s.game_id, CAST(s.game_date AS date), s.matchup, s.wl,
             s.[min], s.fgm, s.fga, s.fg_pct, s.fg3m, s.fg3a, s.fg3_pct,
             s.ftm, s.fta, s.ft_pct, s.oreb, s.dreb, s.reb, s.ast, s.stl, s.blk,
-            s.tov, s.pf, s.pts, s.plus_minus, s.video_available
+            s.tov, s.pf, s.pts, s.plus_minus, s.video_available, {now_chicago_expr}
         );
     """
     with conn:
         cursor = conn.cursor()
+        _ensure_player_stat_last_modified_at(cursor)
         cursor.execute(merge_sql)
         count = cursor.rowcount
     conn.close()

@@ -11,7 +11,7 @@ CREATE TABLE [dbo].[underdog_projection](
 	[stat_type_name] [nvarchar](100) NOT NULL,
 	[line_score] [decimal](10, 2) NULL,
 	[start_time] [datetime2](3) NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_underdog_projection] PRIMARY KEY CLUSTERED ([projection_id] ASC)
 ) ON [PRIMARY]
 END

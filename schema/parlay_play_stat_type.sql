@@ -8,7 +8,7 @@ CREATE TABLE [dbo].[parlay_play_stat_type](
 	[challenge_option] [nvarchar](50) NOT NULL,
 	[challenge_name] [nvarchar](100) NULL,
 	[challenge_units] [nvarchar](20) NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_parlay_play_stat_type] PRIMARY KEY CLUSTERED ([challenge_option] ASC)
 ) ON [PRIMARY]
 END

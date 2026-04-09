@@ -37,11 +37,11 @@ BEGIN
                 [symbol] = s.[symbol],
                 [illustration] = s.[illustration],
                 [popularity] = s.[popularity],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [id], [sport_name], [slug], [symbol], [illustration], [popularity], [last_modified_at]
             ) VALUES (
-                s.[id], s.[sport_name], s.[slug], s.[symbol], s.[illustration], s.[popularity], GETUTCDATE()
+                s.[id], s.[sport_name], s.[slug], s.[symbol], s.[illustration], s.[popularity], GETDATE()
             );
         END
         ELSE IF COL_LENGTH(N'dbo.parlay_play_sport', N'parlay_play_sport_id') IS NOT NULL
@@ -60,11 +60,11 @@ BEGIN
                 [symbol] = s.[symbol],
                 [illustration] = s.[illustration],
                 [popularity] = s.[popularity],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [parlay_play_sport_id], [sport_name], [slug], [symbol], [illustration], [popularity], [last_modified_at]
             ) VALUES (
-                s.[id], s.[sport_name], s.[slug], s.[symbol], s.[illustration], s.[popularity], GETUTCDATE()
+                s.[id], s.[sport_name], s.[slug], s.[symbol], s.[illustration], s.[popularity], GETDATE()
             );
         END
         ELSE
@@ -93,11 +93,11 @@ BEGIN
                 [slug] = s.[slug],
                 [popularity] = s.[popularity],
                 [allowed_players_per_match] = s.[allowed_players_per_match],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [id], [sport_id], [league_name], [league_name_short], [slug], [popularity], [allowed_players_per_match], [last_modified_at]
             ) VALUES (
-                s.[id], s.[sport_id], s.[league_name], s.[league_name_short], s.[slug], s.[popularity], s.[allowed_players_per_match], GETUTCDATE()
+                s.[id], s.[sport_id], s.[league_name], s.[league_name_short], s.[slug], s.[popularity], s.[allowed_players_per_match], GETDATE()
             );
         END
         ELSE IF COL_LENGTH(N'dbo.parlay_play_league', N'parlay_play_league_id') IS NOT NULL
@@ -118,11 +118,11 @@ BEGIN
                 [slug] = s.[slug],
                 [popularity] = s.[popularity],
                 [allowed_players_per_match] = s.[allowed_players_per_match],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [parlay_play_league_id], [sport_id], [league_name], [league_name_short], [slug], [popularity], [allowed_players_per_match], [last_modified_at]
             ) VALUES (
-                s.[id], s.[sport_id], s.[league_name], s.[league_name_short], s.[slug], s.[popularity], s.[allowed_players_per_match], GETUTCDATE()
+                s.[id], s.[sport_id], s.[league_name], s.[league_name_short], s.[slug], s.[popularity], s.[allowed_players_per_match], GETDATE()
             );
         END
         ELSE
@@ -161,13 +161,13 @@ BEGIN
                 [conference] = s.[conference],
                 [rank] = s.[rank],
                 [record] = s.[record],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [id], [sport_id], [league_id], [teamname], [teamname_abbr], [team_abbreviation], [slug], [venue], [logo],
                 [conference], [rank], [record], [last_modified_at]
             ) VALUES (
                 s.[id], s.[sport_id], s.[league_id], s.[teamname], s.[teamname_abbr], s.[team_abbreviation], s.[slug], s.[venue], s.[logo],
-                s.[conference], s.[rank], s.[record], GETUTCDATE()
+                s.[conference], s.[rank], s.[record], GETDATE()
             );
         END
         ELSE IF COL_LENGTH(N'dbo.parlay_play_team', N'parlay_play_team_id') IS NOT NULL
@@ -198,13 +198,13 @@ BEGIN
                 [conference] = s.[conference],
                 [rank] = s.[rank],
                 [record] = s.[record],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [parlay_play_team_id], [sport_id], [league_id], [teamname], [teamname_abbr], [team_abbreviation], [slug], [venue], [logo],
                 [conference], [rank], [record], [last_modified_at]
             ) VALUES (
                 s.[id], s.[sport_id], s.[league_id], s.[teamname], s.[teamname_abbr], s.[team_abbreviation], s.[slug], s.[venue], s.[logo],
-                s.[conference], s.[rank], s.[record], GETUTCDATE()
+                s.[conference], s.[rank], s.[record], GETDATE()
             );
         END
         ELSE
@@ -277,7 +277,7 @@ BEGIN
                 [home_win_prob] = s.[home_win_prob],
                 [away_win_prob] = s.[away_win_prob],
                 [draw_prob] = s.[draw_prob],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [id], [sport_id], [league_id], [home_team_id], [away_team_id], [slug], [match_date], [match_type], [match_status],
                 [match_period], [score_home], [score_away], [time_left], [time_to_start], [time_to_start_min], [home_win_prob], [away_win_prob],
@@ -285,7 +285,7 @@ BEGIN
             ) VALUES (
                 s.[id], s.[sport_id], s.[league_id], s.[home_team_id], s.[away_team_id], s.[slug], s.[match_date], s.[match_type], s.[match_status],
                 s.[match_period], s.[score_home], s.[score_away], s.[time_left], s.[time_to_start], s.[time_to_start_min], s.[home_win_prob], s.[away_win_prob],
-                s.[draw_prob], GETUTCDATE()
+                s.[draw_prob], GETDATE()
             );
         END
         ELSE IF COL_LENGTH(N'dbo.parlay_play_match', N'parlay_play_match_id') IS NOT NULL
@@ -350,7 +350,7 @@ BEGIN
                 [home_win_prob] = s.[home_win_prob],
                 [away_win_prob] = s.[away_win_prob],
                 [draw_prob] = s.[draw_prob],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [parlay_play_match_id], [sport_id], [league_id], [home_team_id], [away_team_id], [slug], [match_date], [match_type], [match_status],
                 [match_period], [score_home], [score_away], [time_left], [time_to_start], [time_to_start_min], [home_win_prob], [away_win_prob],
@@ -358,7 +358,7 @@ BEGIN
             ) VALUES (
                 s.[id], s.[sport_id], s.[league_id], s.[home_team_id], s.[away_team_id], s.[slug], s.[match_date], s.[match_type], s.[match_status],
                 s.[match_period], s.[score_home], s.[score_away], s.[time_left], s.[time_to_start], s.[time_to_start_min], s.[home_win_prob], s.[away_win_prob],
-                s.[draw_prob], GETUTCDATE()
+                s.[draw_prob], GETDATE()
             );
         END
         ELSE
@@ -397,13 +397,13 @@ BEGIN
                 [gender] = s.[gender],
                 [popularity] = s.[popularity],
                 [show_alt_lines] = s.[show_alt_lines],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [id], [sport_id], [team_id], [first_name], [last_name], [full_name], [name_initial], [image], [position],
                 [gender], [popularity], [show_alt_lines], [last_modified_at]
             ) VALUES (
                 s.[id], s.[sport_id], s.[team_id], s.[first_name], s.[last_name], s.[full_name], s.[name_initial], s.[image], s.[position],
-                s.[gender], s.[popularity], s.[show_alt_lines], GETUTCDATE()
+                s.[gender], s.[popularity], s.[show_alt_lines], GETDATE()
             );
         END
         ELSE IF COL_LENGTH(N'dbo.parlay_play_player', N'parlay_play_player_id') IS NOT NULL
@@ -434,13 +434,13 @@ BEGIN
                 [gender] = s.[gender],
                 [popularity] = s.[popularity],
                 [show_alt_lines] = s.[show_alt_lines],
-                [last_modified_at] = GETUTCDATE()
+                [last_modified_at] = GETDATE()
             WHEN NOT MATCHED BY TARGET THEN INSERT (
                 [parlay_play_player_id], [sport_id], [team_id], [first_name], [last_name], [full_name], [name_initial], [image], [position],
                 [gender], [popularity], [show_alt_lines], [last_modified_at]
             ) VALUES (
                 s.[id], s.[sport_id], s.[team_id], s.[first_name], s.[last_name], s.[full_name], s.[name_initial], s.[image], s.[position],
-                s.[gender], s.[popularity], s.[show_alt_lines], GETUTCDATE()
+                s.[gender], s.[popularity], s.[show_alt_lines], GETDATE()
             );
         END
         ELSE
@@ -459,11 +459,11 @@ BEGIN
         ) THEN UPDATE SET
             [challenge_name] = s.[challenge_name],
             [challenge_units] = s.[challenge_units],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [challenge_option], [challenge_name], [challenge_units], [last_modified_at]
         ) VALUES (
-            s.[challenge_option], s.[challenge_name], s.[challenge_units], GETUTCDATE()
+            s.[challenge_option], s.[challenge_name], s.[challenge_units], GETDATE()
         );
     END
 
@@ -555,7 +555,7 @@ BEGIN
             [is_public] = s.[is_public],
             [is_slashed_line] = s.[is_slashed_line],
             [alt_line_count] = s.[alt_line_count],
-            [last_modified_at] = GETUTCDATE()
+            [last_modified_at] = GETDATE()
         WHEN NOT MATCHED BY TARGET THEN INSERT (
             [projection_id], [match_id], [player_id], [challenge_option], [line_score], [is_main_line], [decimal_price_over], [decimal_price_under],
             [market_name], [match_period], [show_default], [display_name], [stat_type_name], [start_time], [promo_deadline], [promo_max_entry],
@@ -565,7 +565,7 @@ BEGIN
             s.[projection_id], s.[match_id], s.[player_id], s.[challenge_option], s.[line_score], s.[is_main_line], s.[decimal_price_over], s.[decimal_price_under],
             s.[market_name], s.[match_period], s.[show_default], s.[display_name], s.[stat_type_name], s.[start_time], s.[promo_deadline], s.[promo_max_entry],
             s.[player_promo_id], s.[player_promo_type], s.[is_boosted_payout], s.[is_player_promo], s.[default_multiplier], s.[promo_multiplier],
-            s.[payout_boost_selection], s.[is_public], s.[is_slashed_line], s.[alt_line_count], GETUTCDATE()
+            s.[payout_boost_selection], s.[is_public], s.[is_slashed_line], s.[alt_line_count], GETDATE()
         );
     END
 END

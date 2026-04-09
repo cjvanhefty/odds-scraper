@@ -12,7 +12,7 @@ CREATE TABLE [dbo].[parlay_play_league](
 	[slug] [nvarchar](50) NULL,
 	[popularity] [nvarchar](20) NULL,
 	[allowed_players_per_match] [int] NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_parlay_play_league] PRIMARY KEY CLUSTERED ([id] ASC),
 	CONSTRAINT [FK_parlay_play_league_sport] FOREIGN KEY ([sport_id]) REFERENCES [dbo].[parlay_play_sport] ([id])
 ) ON [PRIMARY]

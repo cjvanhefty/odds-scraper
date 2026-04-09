@@ -32,7 +32,7 @@ CREATE TABLE [dbo].[parlay_play_projection](
 	[is_public] [bit] NULL,
 	[is_slashed_line] [bit] NULL,
 	[alt_line_count] [int] NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_parlay_play_projection] PRIMARY KEY CLUSTERED ([projection_id] ASC),
 	CONSTRAINT [FK_parlay_play_projection_match] FOREIGN KEY ([match_id]) REFERENCES [dbo].[parlay_play_match] ([id]),
 	CONSTRAINT [FK_parlay_play_projection_player] FOREIGN KEY ([player_id]) REFERENCES [dbo].[parlay_play_player] ([id]),

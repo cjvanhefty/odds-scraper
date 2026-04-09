@@ -23,7 +23,7 @@ CREATE TABLE [dbo].[parlay_play_match](
 	[home_win_prob] [nvarchar](20) NULL,
 	[away_win_prob] [nvarchar](20) NULL,
 	[draw_prob] [nvarchar](20) NULL,
-	[last_modified_at] [datetime2](7) NOT NULL DEFAULT GETUTCDATE(),
+	[last_modified_at] [datetime2](7) NOT NULL DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
 	CONSTRAINT [PK_parlay_play_match] PRIMARY KEY CLUSTERED ([id] ASC),
 	CONSTRAINT [FK_parlay_play_match_sport] FOREIGN KEY ([sport_id]) REFERENCES [dbo].[parlay_play_sport] ([id]),
 	CONSTRAINT [FK_parlay_play_match_league] FOREIGN KEY ([league_id]) REFERENCES [dbo].[parlay_play_league] ([id]),
