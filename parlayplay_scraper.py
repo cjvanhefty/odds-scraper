@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from cross_book_stat_normalize import normalize_stat_basic
+
 CHICAGO = ZoneInfo("America/Chicago")
 CHICAGO_FMT = "%m/%d/%Y %H:%M:%S"  # 03/17/2026 17:06:00
 
@@ -137,74 +139,10 @@ def _to_chicago_datetime(value) -> str | None:
     chicago = dt.astimezone(CHICAGO)
     return chicago.strftime(CHICAGO_FMT)
 
-# Map Parlay Play stat names to PrizePicks stat_type_name for matching
-STAT_NORMALIZE = {
-    "pts": "Points",
-    "points": "Points",
-    "reb": "Rebounds",
-    "rebounds": "Rebounds",
-    "ast": "Assists",
-    "assists": "Assists",
-    "stl": "Steals",
-    "steals": "Steals",
-    "blk": "Blocks",
-    "blocks": "Blocks",
-    "tov": "Turnovers",
-    "turnovers": "Turnovers",
-    # Blocks+Steals (aka "stocks")
-    "blksstls": "Blks+Stls",
-    "blockssteals": "Blks+Stls",
-    "stocks": "Blks+Stls",
-    "3pm": "3 Pointers Made",
-    "3pmade": "3 Pointers Made",
-    "3pointersmade": "3 Pointers Made",
-    "threes": "3 Pointers Made",
-    "3pt": "3 Pointers",
-    "3ptm": "3 Pointers Made",
-    "3ptmade": "3 Pointers Made",
-    # ParlayPlay API stat_type values (e.g. bb_threePointersMade)
-    "bbthreepointersmade": "3 Pointers Made",
-    "bbthreepointersattempted": "3-PT Attempted",
-    "bbthreepointfieldgoalsattempted": "3-PT Attempted",
-    "bbfg3a": "3-PT Attempted",
-    "bb3ptattempted": "3-PT Attempted",
-    "3sattempted": "3-PT Attempted",
-    "attemptedthrees": "3-PT Attempted",
-    "threepointersattempted": "3-PT Attempted",
-    "oreb": "Offensive Rebounds",
-    "dreb": "Defensive Rebounds",
-    "ptsreb": "Pts+Rebs",
-    "ptsast": "Pts+Asts",
-    "ptsrebast": "Pts+Rebs+Asts",
-    "rebast": "Rebs+Asts",
-    "fantasypoints": "Fantasy Score",
-    # ParlayPlay `challenge_option` values from dbo.parlay_play_stat_type (bb_*).
-    # These should normalize to the same canonical labels used across providers.
-    "bbpoints": "Points",
-    "bbrebounds": "Rebounds",
-    "bbassists": "Assists",
-    "bbsteals": "Steals",
-    "bbblocks": "Blocks",
-    "bbdreb": "Defensive Rebounds",
-    "bboreb": "Offensive Rebounds",
-    "bbfgmade": "FG Made",
-    "bbfreethrowsmade": "Free Throws Made",
-    "bbparlaypoints": "Fantasy Score",
-    "bbptsast": "Pts+Asts",
-    "bbptsreb": "Pts+Rebs",
-    "bbptsrebast": "Pts+Rebs+Asts",
-    "bbrebast": "Rebs+Asts",
-    "bbdd": "Double Doubles",
-    "bbtd": "Triple Doubles",
-    "bbfirstbasket": "First Point Scorer",
-}
-
-
 def _normalize_stat(s: str) -> str:
     if not s:
         return ""
-    key = re.sub(r"[^a-z0-9]", "", s.strip().lower())
-    return STAT_NORMALIZE.get(key, s.strip())
+    return normalize_stat_basic(s)
 
 
 def _parlay_infer_three_pt_attempt_stat(*parts: str | None) -> str | None:

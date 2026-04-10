@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from cross_book_stat_normalize import normalize_stat_basic
+
 CHICAGO = ZoneInfo("America/Chicago")
 
 
@@ -42,78 +44,10 @@ def to_chicago_local(ts) -> str | None:
     except (ValueError, TypeError):
         return None
 
-# Map Underdog stat names to PrizePicks stat_type_name for matching
-STAT_NORMALIZE = {
-    "pts": "Points",
-    "points": "Points",
-    # Underdog stat codes (appearance_stat.stat)
-    "point": "Points",
-    "reb": "Rebounds",
-    "rebounds": "Rebounds",
-    "ast": "Assists",
-    "assists": "Assists",
-    "stl": "Steals",
-    "steals": "Steals",
-    "blk": "Blocks",
-    "blocks": "Blocks",
-    "blockedshots": "Blocked Shots",
-    "tov": "Turnovers",
-    "to": "Turnovers",
-    "turnovers": "Turnovers",
-    "turnover": "Turnovers",
-    "3pm": "3 Pointers Made",
-    "3pmade": "3 Pointers Made",
-    "3pointersmade": "3 Pointers Made",  # Underdog uses "3-Pointers Made"
-    "threepointsmade": "3 Pointers Made",  # API code: three_points_made
-    "threes": "3 Pointers Made",
-    "3pt": "3 Pointers",
-    "3ptm": "3 Pointers Made",
-    # Underdog full-game 3PA label (see API display_stat "3s Attempted")
-    "3sattempted": "3-PT Attempted",
-    "threepointsatt": "3-PT Attempted",  # API code: three_points_att
-    "fgattempted": "FG Attempted",
-    "fieldgoalsatt": "FG Attempted",  # API code: field_goals_att
-    "ftmade": "Free Throws Made",
-    "freethrowsmade": "Free Throws Made",  # API code: free_throws_made
-    "oreb": "Offensive Rebounds",
-    "dreb": "Defensive Rebounds",
-    # Common Underdog display_stat spellings for combos
-    "ptsrebsasts": "Pts+Rebs+Asts",         # "Pts + Rebs + Asts" (also API code: pts_rebs_asts)
-    "ptsrebsast": "Pts+Rebs+Asts",
-    "ptsrebsasts1h": "1H Pts + Rebs + Asts",
-    "pointsreboundsassists": "Pts+Rebs+Asts",
-    "pointsrebounds": "Pts+Rebs",           # "Points + Rebounds"
-    "pointsassists": "Pts+Asts",            # "Points + Assists"
-    "reboundsassists": "Rebs+Asts",         # "Rebounds + Assists"
-    "blockssteals": "Blks+Stls",            # "Blocks + Steals"
-    "blksstls": "Blks+Stls",                # API code: blks_stls
-    "ptsasts": "Pts+Asts",                  # API code: pts_asts
-    "ptsrebs": "Pts+Rebs",                  # API code: pts_rebs
-    "rebsasts": "Rebs+Asts",                # API code: rebs_asts
-    "doubledoubles": "Double Doubles",      # API code: double_doubles
-    "tripledoubles": "Triple Doubles",      # API code: triple_doubles
-    # Underdog uses "Fantasy Points" / "fantasy_points" for its fantasy scoring market.
-    # We normalize to the cross-provider label used by PrizePicks/ParlayPlay: "Fantasy Score".
-    "fantasypoints": "Fantasy Score",
-    # Underdog NBA period markets (1Q / 1H). Keep these distinct; they won't match full-game PP markets.
-    "period1points": "1Q Points",
-    "period12points": "1H Points",
-    "period1rebounds": "1Q Rebounds",
-    "period12rebounds": "1H Rebounds",
-    "period1assists": "1Q Assists",
-    "period12assists": "1H Assists",
-    "period1threepointsmade": "1Q 3-Pointers Made",
-    "period12threepointsmade": "1H 3-Pointers Made",
-    "period1ptsrebsasts": "1Q Pts + Rebs + Asts",
-    "period12ptsrebsasts": "1H Pts + Rebs + Asts",
-}
-
-
 def _normalize_stat(s: str) -> str:
     if not s:
         return ""
-    key = re.sub(r"[^a-z0-9]", "", s.strip().lower())
-    return STAT_NORMALIZE.get(key, s.strip())
+    return normalize_stat_basic(s)
 
 
 def _get_db_conn(

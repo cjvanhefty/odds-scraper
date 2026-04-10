@@ -5,7 +5,6 @@ Run from repo root: uvicorn app.main:app --reload
 
 import logging
 import os
-import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -42,6 +41,25 @@ from projection_over_streak import (
 
 from app.db import get_conn
 
+from cross_book_stat_normalize import normalize_for_join, parlay_match_league_id_for_prizepicks
+
+
+def _lookup_parlay_line(
+    scoped: dict,
+    fallback: dict,
+    pp_league_id,
+    display_name: str,
+    norm_stat: str,
+    game_date: str,
+):
+    """Prefer Parlay rows in the Parlay league that maps from PrizePicks league_id; else name+stat+date."""
+    pl = parlay_match_league_id_for_prizepicks(pp_league_id)
+    if pl is not None:
+        v = scoped.get((pl, display_name, norm_stat, game_date))
+        if v is not None:
+            return v
+    return fallback.get((display_name, norm_stat, game_date))
+
 
 def _json_safe(val):
     """Coerce value to JSON-serializable type (e.g. Decimal -> float, for API responses)."""
@@ -61,112 +79,6 @@ def _json_safe(val):
     if isinstance(val, dict):
         return {k: _json_safe(v) for k, v in val.items()}
     return val
-
-
-def _normalize_join_stat_aliases_only(s: str) -> str:
-    """PrizePicks-equivalent label merge for joins (Blocks, DD, 3PT)."""
-    if s in ("Blocks", "Blocked Shots"):
-        return "Blocks__Blocked_Shots"
-    if s in ("Double Doubles", "Double-Doubles"):
-        return "Double_Doubles"
-    # Align with projection_over_streak stat_join_expr_ud0/ud1: Blks+Stls, Blocks + Steals, Blocks+Steals
-    if s.startswith("Blks+Stls") or s in ("Blocks + Steals", "Blocks+Steals"):
-        return "Blks_Stls"
-    if s in ("3-PT Attempted", "3 Pointers Attempted", "3s Attempted"):
-        return "FG3A"
-    if s in ("3 Pointers", "3 Pointers Made", "3-PT Made"):
-        return "FG3M"
-    return s
-
-
-def _normalize_join_stat(stat_type_name: str | None) -> str:
-    """Normalize stat names for cross-provider joins (UI keys), without changing what we display."""
-    s = (stat_type_name or "").strip()
-    pre = _normalize_join_stat_aliases_only(s)
-    if pre != s:
-        return pre
-    # Parlay Play often stores API codes in stat_type_name (bb_points, bb_ptsReb) while PrizePicks uses
-    # "Points", "Pts+Rebs", etc. Keys match parlayplay_scraper._normalize_stat (alphanumeric only).
-    key = re.sub(r"[^a-z0-9]", "", s.lower())
-    mapped = _JOIN_STAT_ALNUM.get(key)
-    if mapped is not None:
-        return _normalize_join_stat_aliases_only(mapped)
-    return s
-
-
-# Same idea as parlayplay_scraper.STAT_NORMALIZE plus bb_/bab_* challenge codes seen in DB.
-_JOIN_STAT_ALNUM: dict[str, str] = {
-    "pts": "Points",
-    "points": "Points",
-    "reb": "Rebounds",
-    "rebounds": "Rebounds",
-    "ast": "Assists",
-    "assists": "Assists",
-    "stl": "Steals",
-    "steals": "Steals",
-    "blk": "Blocks",
-    "blocks": "Blocks",
-    "tov": "Turnovers",
-    "turnovers": "Turnovers",
-    "blksstls": "Blks+Stls",
-    "blockssteals": "Blks+Stls",
-    "stocks": "Blks+Stls",
-    "3pm": "3 Pointers Made",
-    "3pmade": "3 Pointers Made",
-    "3pointersmade": "3 Pointers Made",
-    "threes": "3 Pointers Made",
-    "3pt": "3 Pointers",
-    "3ptm": "3 Pointers Made",
-    "3ptmade": "3 Pointers Made",
-    "bbthreepointersmade": "3 Pointers Made",
-    "bbthreepointersattempted": "3-PT Attempted",
-    "bbthreepointfieldgoalsattempted": "3-PT Attempted",
-    "bbfg3a": "3-PT Attempted",
-    "bb3ptattempted": "3-PT Attempted",
-    "3sattempted": "3-PT Attempted",
-    "attemptedthrees": "3-PT Attempted",
-    "threepointersattempted": "3-PT Attempted",
-    "oreb": "Offensive Rebounds",
-    "dreb": "Defensive Rebounds",
-    "ptsreb": "Pts+Rebs",
-    "ptsast": "Pts+Asts",
-    "ptsrebast": "Pts+Rebs+Asts",
-    "rebast": "Rebs+Asts",
-    "fantasypoints": "Fantasy Score",
-    # NBA bb_* codes (parlay_play_projection.stat_type_name)
-    "bbpoints": "Points",
-    "bbrebounds": "Rebounds",
-    "bbassists": "Assists",
-    "bbsteals": "Steals",
-    "bbblocks": "Blocks",
-    "bbturnovers": "Turnovers",
-    "bbpersonal": "Personal Fouls",
-    "bbptsreb": "Pts+Rebs",
-    "bbptsast": "Pts+Asts",
-    "bbptsrebast": "Pts+Rebs+Asts",
-    "bbrebast": "Rebs+Asts",
-    "bbdd": "Double Doubles",
-    "bbtd": "Triple Doubles",
-    "bbfgmade": "FG Made",
-    "bbfgattempted": "FG Attempted",
-    "bbtwopointersmade": "Two Pointers Made",
-    "bbtwopointersattempted": "Two Pointers Attempted",
-    "bbfreethrowsmade": "Free Throws Made",
-    "bbfreethrowsattempted": "Free Throws Attempted",
-    "bbparlaypoints": "Fantasy Score",
-    "bbfirstbasket": "First Point Scorer",
-    # MLB bab_* codes
-    "babhrr": "Hits + Runs + RBIs",
-    "babrbi": "RBIs",
-    "babsingles": "Singles",
-    "babdoubles": "Doubles",
-    "babhits": "Hits",
-    "babhomeruns": "Home Runs",
-    "babruns": "Runs",
-    "babstrikeouts": "Strikeouts",
-    "babtotalbases": "Total Bases",
-    "babtriples": "Triples",
-}
 
 
 def _parlay_slate_date_bounds(projections: list) -> tuple[str, str] | None:
@@ -197,8 +109,11 @@ def get_parlay_play_lines_by_match(
     conn,
     date_from: str | None = None,
     date_to: str | None = None,
-) -> dict:
-    """Return (display_name, stat_type_name, game_date) -> line_score for matching to PrizePicks.
+) -> tuple[dict, dict]:
+    """Return (scoped, fallback) dicts for Parlay Play lines keyed for PrizePicks joins.
+
+    scoped: (parlay_match_league_id, display_name, norm_stat, game_date) -> line_score
+    fallback: (display_name, norm_stat, game_date) -> line_score (first wins; used when PP league has no 1:1 Parlay id)
 
     When date_from/date_to are set (YYYY-MM-DD), only Parlay Play rows in that Central-date range are read.
     When both are None, uses a rolling ~45-day window to avoid scanning the full history table.
@@ -214,33 +129,37 @@ def get_parlay_play_lines_by_match(
         # ORDER BY is_main_line DESC so the first row per key is the main line when the same stat appears twice.
         cursor.execute(
             """
-            SELECT display_name, stat_type_name,
-                   CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
-                   line_score
-            FROM [dbo].[parlay_play_projection]
-            WHERE display_name IS NOT NULL AND stat_type_name IS NOT NULL
-              AND CONVERT(date, CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) >= ?
-              AND CONVERT(date, CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) <= ?
-            ORDER BY display_name, stat_type_name,
-                     CONVERT(varchar(10), CAST(start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120),
-                     is_main_line DESC
+            SELECT m.league_id, p.display_name, p.stat_type_name,
+                   CONVERT(varchar(10), CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
+                   p.line_score
+            FROM [dbo].[parlay_play_projection] p
+            INNER JOIN [dbo].[parlay_play_match] m ON m.id = p.match_id
+            WHERE p.display_name IS NOT NULL AND p.stat_type_name IS NOT NULL
+              AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) >= ?
+              AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) <= ?
+            ORDER BY m.league_id, p.display_name, p.stat_type_name,
+                     CONVERT(varchar(10), CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120),
+                     p.is_main_line DESC
             """,
             (date_from, date_to),
         )
-        key_to_line = {}
+        scoped: dict = {}
+        fallback: dict = {}
         for row in cursor.fetchall():
-            name = (row[0] or "").strip()
-            stat = _normalize_join_stat((row[1] or "").strip())
-            date_part = (row[2] or "")[:10]
-            line = float(row[3]) if row[3] is not None else None
-            if name and stat and date_part:
-                key = (name, stat, date_part)
-                if key in key_to_line:
-                    continue
-                key_to_line[key] = line
-        return key_to_line
+            plid = int(row[0])
+            name = (row[1] or "").strip()
+            stat = normalize_for_join((row[2] or "").strip())
+            date_part = (row[3] or "")[:10]
+            line = float(row[4]) if row[4] is not None else None
+            if not name or not stat or not date_part:
+                continue
+            scoped[(plid, name, stat, date_part)] = line
+            k2 = (name, stat, date_part)
+            if k2 not in fallback:
+                fallback[k2] = line
+        return scoped, fallback
     except Exception:
-        return {}
+        return {}, {}
     finally:
         cursor.close()
 
@@ -425,14 +344,16 @@ def list_projections(
                 for p in projections
             ]
         if not projections:
-            parlay_play_map = {}
+            parlay_play_scoped, parlay_play_fallback = {}, {}
         else:
             slate_bounds = _parlay_slate_date_bounds(projections)
             if slate_bounds:
                 d0, d1 = slate_bounds
-                parlay_play_map = get_parlay_play_lines_by_match(conn, date_from=d0, date_to=d1)
+                parlay_play_scoped, parlay_play_fallback = get_parlay_play_lines_by_match(
+                    conn, date_from=d0, date_to=d1
+                )
             else:
-                parlay_play_map = get_parlay_play_lines_by_match(conn)
+                parlay_play_scoped, parlay_play_fallback = get_parlay_play_lines_by_match(conn)
         out = []
         for r in projections:
             r = dict(r)
@@ -444,11 +365,17 @@ def list_projections(
                     row[k] = v
             # line_underdog comes from get_projections (join via [player].underdog_player_id)
             display_name = (r.get("display_name") or r.get("pp_name") or "").strip()
-            stat_type_name = _normalize_join_stat((r.get("stat_type_name") or "").strip())
+            stat_type_name = normalize_for_join((r.get("stat_type_name") or "").strip())
             start_time = r.get("start_time")
             game_date = (str(start_time)[:10] if start_time else "") or ""
-            key = (display_name, stat_type_name, game_date)
-            row["line_parlay_play"] = parlay_play_map.get(key)
+            row["line_parlay_play"] = _lookup_parlay_line(
+                parlay_play_scoped,
+                parlay_play_fallback,
+                r.get("league_id"),
+                display_name,
+                stat_type_name,
+                game_date,
+            )
             # Opponent and H/A from prizepicks_game when available
             home_abbrev = (r.get("home_abbreviation") or "").strip()
             away_abbrev = (r.get("away_abbreviation") or "").strip()
