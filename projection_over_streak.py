@@ -164,30 +164,45 @@ def get_projections(
     stat_join_expr_p = """
         CASE
             WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
-            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles', N'Double-Double') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Triple Doubles', N'Triple-Doubles', N'Triple-Double') THEN N'Triple_Doubles'
             WHEN LTRIM(RTRIM(p.stat_type_name)) LIKE N'Blks+Stls%' THEN N'Blks_Stls'
             WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3-PT Attempted', N'3 Pointers Attempted', N'3s Attempted') THEN N'FG3A'
-            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made', N'3-Pointers Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Hits+Runs+RBIs', N'Hits + Runs + RBIs') THEN N'Hits+Runs+RBIs'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Shots On Target', N'Shots on Target') THEN N'Shots On Target'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Goal + Assist', N'Goals + Assists') THEN N'Goal + Assist'
+            WHEN LTRIM(RTRIM(p.stat_type_name)) IN (N'Passes Attempted', N'Passes') THEN N'Passes Attempted'
             ELSE LTRIM(RTRIM(p.stat_type_name))
         END
     """
     stat_join_expr_ud0 = """
         CASE
             WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
-            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles', N'Double-Double') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Triple Doubles', N'Triple-Doubles', N'Triple-Double') THEN N'Triple_Doubles'
             WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Blks+Stls', N'Blocks + Steals', N'Blocks+Steals') THEN N'Blks_Stls'
             WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3-PT Attempted', N'3 Pointers Attempted', N'3s Attempted') THEN N'FG3A'
-            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made', N'3-Pointers Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Hits+Runs+RBIs', N'Hits + Runs + RBIs') THEN N'Hits+Runs+RBIs'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Shots On Target', N'Shots on Target') THEN N'Shots On Target'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Goal + Assist', N'Goals + Assists') THEN N'Goal + Assist'
+            WHEN LTRIM(RTRIM(ud0.stat_type_name)) IN (N'Passes Attempted', N'Passes') THEN N'Passes Attempted'
             ELSE LTRIM(RTRIM(ud0.stat_type_name))
         END
     """
     stat_join_expr_ud1 = """
         CASE
             WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Blocks', N'Blocked Shots') THEN N'Blocks__Blocked_Shots'
-            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Double Doubles', N'Double-Doubles', N'Double-Double') THEN N'Double_Doubles'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Triple Doubles', N'Triple-Doubles', N'Triple-Double') THEN N'Triple_Doubles'
             WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Blks+Stls', N'Blocks + Steals', N'Blocks+Steals') THEN N'Blks_Stls'
             WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3-PT Attempted', N'3 Pointers Attempted', N'3s Attempted') THEN N'FG3A'
-            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'3 Pointers', N'3 Pointers Made', N'3-PT Made', N'3-Pointers Made') THEN N'FG3M'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Hits+Runs+RBIs', N'Hits + Runs + RBIs') THEN N'Hits+Runs+RBIs'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Shots On Target', N'Shots on Target') THEN N'Shots On Target'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Goal + Assist', N'Goals + Assists') THEN N'Goal + Assist'
+            WHEN LTRIM(RTRIM(ud1.stat_type_name)) IN (N'Passes Attempted', N'Passes') THEN N'Passes Attempted'
             ELSE LTRIM(RTRIM(ud1.stat_type_name))
         END
     """

@@ -233,7 +233,26 @@
     // Default sport on load
     var selectedLeagueId = '7';
     var LEAGUE_NAMES = { 2: 'MLB', 7: 'NBA', 8: 'NHL', 9: 'Football', 14: 'EPL', 15: 'CFB', 20: 'CBB', 82: 'Soccer' };
-    var statOrder = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Fantasy Score', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
+    var statOrderNBA = ['Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Blocked Shots', 'Blks+Stls', 'Turnovers', 'Fantasy Score', 'Defensive Rebounds', 'Offensive Rebounds', 'Pts+Rebs+Asts', 'Pts+Rebs', 'Pts+Asts', 'Rebs+Asts', 'FG Made', 'FG Attempted', 'Two Pointers Made', 'Two Pointers Attempted', 'Free Throws Made', 'Free Throws Attempted', '3-PT Made', '3 Pointers Made', '3 Pointers', 'Personal Fouls'];
+    var statOrderMLB = ['Hits+Runs+RBIs', 'Total Bases', 'Hits', 'Hitter Strikeouts', 'RBIs', 'Runs', 'Singles', 'Doubles', 'Walks', 'Home Runs', 'Stolen Bases', 'Pitcher Strikeouts', 'Earned Runs Allowed', 'Walks Allowed', 'Hits Allowed', '1st Inning Runs Allowed', 'Pitching Outs', 'Triples', 'Hitter Fantasy Score'];
+    var statOrderFootball = ['Pass Yards', 'Pass TDs', 'Rush Yards', 'Rush TDs', 'Receiving Yards', 'Rec TDs', 'Rush + Rec TDs', 'Sacks'];
+    var statOrderSoccer = ['Shots', 'Shots On Target', 'Tackles', 'Goal + Assist', 'Goals', 'Fouls', 'Assists', 'Goalie Saves', 'Passes Attempted', 'Clearances', 'Shots Assisted', 'Attempted Dribbles', 'Crosses', 'Cards', 'Offsides', 'Goals Allowed'];
+    var statOrderNHL = ['Points', 'Assists', 'Shots On Goal', 'Goals', 'Blocked Shots', 'Power Play Points', 'Saves'];
+    var statOrderByLeague = {
+      '2': statOrderMLB,
+      '7': statOrderNBA,
+      '8': statOrderNHL,
+      '9': statOrderFootball,
+      '14': statOrderSoccer,
+      '15': statOrderFootball,
+      '20': statOrderNBA,
+      '82': statOrderSoccer
+    };
+    function getStatOrder() {
+      var ids = getSelectedLeagueIds();
+      var lid = (ids && ids.length) ? String(ids[0]) : '7';
+      return statOrderByLeague[lid] || statOrderNBA;
+    }
 
     function getLeaguesFromProjections() {
       var list = Array.isArray(currentProjections) ? currentProjections : [];
@@ -351,8 +370,9 @@
         if (s) seen[s] = true;
       });
       var statTypes = Object.keys(seen).sort(function (a, b) {
-        var i = statOrder.indexOf(a);
-        var j = statOrder.indexOf(b);
+        var ord = getStatOrder();
+        var i = ord.indexOf(a);
+        var j = ord.indexOf(b);
         if (i !== -1 && j !== -1) return i - j;
         if (i !== -1) return -1;
         if (j !== -1) return 1;
@@ -423,9 +443,10 @@
           var name = (r.display_name || r.pp_name || '').trim();
           if (!name) return;
           var st = (r.stat_type_name || '').trim();
-          var order = statOrder.indexOf(st);
+          var ord = getStatOrder();
+          var order = ord.indexOf(st);
           if (order < 0) order = 9999;
-          if (!byPlayer[name] || order < statOrder.indexOf((byPlayer[name].stat_type_name || '').trim())) {
+          if (!byPlayer[name] || order < ord.indexOf((byPlayer[name].stat_type_name || '').trim())) {
             byPlayer[name] = r;
           }
         });
@@ -619,8 +640,9 @@
         });
         modalState.byStat = byStat;
         var stats = Object.keys(byStat).sort(function (a, b) {
-          var i = statOrder.indexOf(a);
-          var j = statOrder.indexOf(b);
+          var ord = getStatOrder();
+          var i = ord.indexOf(a);
+          var j = ord.indexOf(b);
           if (i !== -1 && j !== -1) return i - j;
           if (i !== -1) return -1;
           if (j !== -1) return 1;
