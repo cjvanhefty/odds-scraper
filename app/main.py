@@ -113,7 +113,7 @@ def get_parlay_play_lines_by_match(
     """Return (scoped, fallback) dicts for Parlay Play lines keyed for PrizePicks joins.
 
     scoped: (parlay_match_league_id, display_name, norm_stat, game_date) -> line_score
-    fallback: (display_name, norm_stat, game_date) -> line_score (first wins; used when PP league has no 1:1 Parlay id)
+    fallback: (display_name, norm_stat, game_date) -> line_score (last wins; same main-line preference as scoped)
 
     When date_from/date_to are set (YYYY-MM-DD), only Parlay Play rows in that Central-date range are read.
     When both are None, uses a rolling ~45-day window to avoid scanning the full history table.
@@ -126,7 +126,8 @@ def get_parlay_play_lines_by_match(
             date_from = start.isoformat()
             date_to = (end + timedelta(days=2)).isoformat()
         # Include alt lines: 3-PT attempts are often is_main_line=0 while sharing a parent "made threes" market.
-        # ORDER BY is_main_line DESC so the first row per key is the main line when the same stat appears twice.
+        # Rows are merged into dicts with last-write-wins. ORDER BY main-last (non-main rows first) so the
+        # final line_score per key is is_main_line=1, matching PrizePicks/Underdog standard odds.
         cursor.execute(
             """
             SELECT m.league_id, p.display_name, p.stat_type_name,
@@ -139,7 +140,7 @@ def get_parlay_play_lines_by_match(
               AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) <= ?
             ORDER BY m.league_id, p.display_name, p.stat_type_name,
                      CONVERT(varchar(10), CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120),
-                     p.is_main_line DESC
+                     CASE WHEN p.is_main_line = 1 THEN 1 ELSE 0 END ASC
             """,
             (date_from, date_to),
         )
@@ -153,10 +154,10 @@ def get_parlay_play_lines_by_match(
             line = float(row[4]) if row[4] is not None else None
             if not name or not stat or not date_part:
                 continue
-            scoped[(plid, name, stat, date_part)] = line
+            sk = (plid, name, stat, date_part)
+            scoped[sk] = line
             k2 = (name, stat, date_part)
-            if k2 not in fallback:
-                fallback[k2] = line
+            fallback[k2] = line
         return scoped, fallback
     except Exception:
         return {}, {}
