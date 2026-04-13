@@ -197,6 +197,175 @@ def _archive_missing_from_stage(conn, sportsbook: str, stage_table: str) -> None
     )
 
 
+def _archive_line_changes_prizepicks(conn) -> None:
+    """Archive currently active PrizePicks rows when line_score changes in stage."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        DECLARE @nowCentral datetime2(7) =
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
+
+        ;WITH src AS (
+            SELECT
+                CAST(s.projection_id AS bigint) AS external_projection_id,
+                s.line_score
+            FROM [dbo].[prizepicks_projection_stage] s
+            WHERE s.player_id IS NOT NULL
+              AND LTRIM(RTRIM(COALESCE(s.stat_type_name, N''))) <> N''
+        )
+        INSERT INTO [dbo].[sportsbook_projection_history](
+            sportsbook, external_projection_id, source_player_id, source_game_id,
+            player_name, stat_type_name, line_score, odds_type, start_time, league_id,
+            team, team_name, home_abbreviation, away_abbreviation, opponent_abbreviation,
+            home_away, event_name, extra_json, created_at, last_modified_at,
+            archived_at, archive_reason
+        )
+        SELECT
+            p.sportsbook, p.external_projection_id, p.source_player_id, p.source_game_id,
+            p.player_name, p.stat_type_name, p.line_score, p.odds_type, p.start_time, p.league_id,
+            p.team, p.team_name, p.home_abbreviation, p.away_abbreviation, p.opponent_abbreviation,
+            p.home_away, p.event_name, p.extra_json, p.created_at, p.last_modified_at,
+            @nowCentral, N'line_changed'
+        FROM [dbo].[sportsbook_projection] p
+        INNER JOIN src s
+            ON p.sportsbook = N'prizepicks'
+           AND p.external_projection_id = s.external_projection_id
+        WHERE
+            (p.line_score <> s.line_score
+             OR (p.line_score IS NULL AND s.line_score IS NOT NULL)
+             OR (p.line_score IS NOT NULL AND s.line_score IS NULL))
+          AND NOT EXISTS (
+              SELECT 1
+              FROM [dbo].[sportsbook_projection_history] h
+              WHERE h.sportsbook = p.sportsbook
+                AND h.external_projection_id = p.external_projection_id
+                AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+                AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+                AND h.archive_reason = N'line_changed'
+          );
+        """
+    )
+
+
+def _archive_line_changes_underdog(conn) -> None:
+    """Archive currently active Underdog rows when line_score changes in stage."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        DECLARE @nowCentral datetime2(7) =
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
+
+        ;WITH ranked_stage AS (
+            SELECT
+                s.projection_id,
+                s.line_score,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.projection_id
+                    ORDER BY
+                        ISNULL(s.updated_at, N'') DESC,
+                        ISNULL(CAST(s.start_time AS datetime2(3)), CAST('1900-01-01' AS datetime2(3))) DESC
+                ) AS rn
+            FROM [dbo].[underdog_projection_stage] s
+        ),
+        src AS (
+            SELECT CAST(projection_id AS bigint) AS external_projection_id, line_score
+            FROM ranked_stage
+            WHERE rn = 1
+        )
+        INSERT INTO [dbo].[sportsbook_projection_history](
+            sportsbook, external_projection_id, source_player_id, source_game_id,
+            player_name, stat_type_name, line_score, odds_type, start_time, league_id,
+            team, team_name, home_abbreviation, away_abbreviation, opponent_abbreviation,
+            home_away, event_name, extra_json, created_at, last_modified_at,
+            archived_at, archive_reason
+        )
+        SELECT
+            p.sportsbook, p.external_projection_id, p.source_player_id, p.source_game_id,
+            p.player_name, p.stat_type_name, p.line_score, p.odds_type, p.start_time, p.league_id,
+            p.team, p.team_name, p.home_abbreviation, p.away_abbreviation, p.opponent_abbreviation,
+            p.home_away, p.event_name, p.extra_json, p.created_at, p.last_modified_at,
+            @nowCentral, N'line_changed'
+        FROM [dbo].[sportsbook_projection] p
+        INNER JOIN src s
+            ON p.sportsbook = N'underdog'
+           AND p.external_projection_id = s.external_projection_id
+        WHERE
+            (p.line_score <> s.line_score
+             OR (p.line_score IS NULL AND s.line_score IS NOT NULL)
+             OR (p.line_score IS NOT NULL AND s.line_score IS NULL))
+          AND NOT EXISTS (
+              SELECT 1
+              FROM [dbo].[sportsbook_projection_history] h
+              WHERE h.sportsbook = p.sportsbook
+                AND h.external_projection_id = p.external_projection_id
+                AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+                AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+                AND h.archive_reason = N'line_changed'
+          );
+        """
+    )
+
+
+def _archive_line_changes_parlay_play(conn) -> None:
+    """Archive currently active Parlay rows when line_score changes in stage."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        DECLARE @nowCentral datetime2(7) =
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
+
+        ;WITH ranked_stage AS (
+            SELECT
+                s.projection_id,
+                s.line_score,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.projection_id
+                    ORDER BY
+                        CASE WHEN s.is_main_line = 1 THEN 0 ELSE 1 END,
+                        ISNULL(s.alt_line_count, 0) DESC,
+                        ISNULL(s.line_score, -1) DESC
+                ) AS rn
+            FROM [dbo].[parlay_play_projection_stage] s
+        ),
+        src AS (
+            SELECT CAST(projection_id AS bigint) AS external_projection_id, line_score
+            FROM ranked_stage
+            WHERE rn = 1
+        )
+        INSERT INTO [dbo].[sportsbook_projection_history](
+            sportsbook, external_projection_id, source_player_id, source_game_id,
+            player_name, stat_type_name, line_score, odds_type, start_time, league_id,
+            team, team_name, home_abbreviation, away_abbreviation, opponent_abbreviation,
+            home_away, event_name, extra_json, created_at, last_modified_at,
+            archived_at, archive_reason
+        )
+        SELECT
+            p.sportsbook, p.external_projection_id, p.source_player_id, p.source_game_id,
+            p.player_name, p.stat_type_name, p.line_score, p.odds_type, p.start_time, p.league_id,
+            p.team, p.team_name, p.home_abbreviation, p.away_abbreviation, p.opponent_abbreviation,
+            p.home_away, p.event_name, p.extra_json, p.created_at, p.last_modified_at,
+            @nowCentral, N'line_changed'
+        FROM [dbo].[sportsbook_projection] p
+        INNER JOIN src s
+            ON p.sportsbook = N'parlay_play'
+           AND p.external_projection_id = s.external_projection_id
+        WHERE
+            (p.line_score <> s.line_score
+             OR (p.line_score IS NULL AND s.line_score IS NOT NULL)
+             OR (p.line_score IS NOT NULL AND s.line_score IS NULL))
+          AND NOT EXISTS (
+              SELECT 1
+              FROM [dbo].[sportsbook_projection_history] h
+              WHERE h.sportsbook = p.sportsbook
+                AND h.external_projection_id = p.external_projection_id
+                AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+                AND ((h.line_score = p.line_score) OR (h.line_score IS NULL AND p.line_score IS NULL))
+                AND h.archive_reason = N'line_changed'
+          );
+        """
+    )
+
+
 def _sync_prizepicks_from_stage(conn) -> None:
     cursor = conn.cursor()
     cursor.execute(
@@ -541,12 +710,15 @@ def sync_sportsbook_projection_snapshot(
         ensure_sportsbook_projection_table(conn)
         with conn:
             if sb == "prizepicks":
+                _archive_line_changes_prizepicks(conn)
                 _sync_prizepicks_from_stage(conn)
                 _archive_missing_from_stage(conn, "prizepicks", "prizepicks_projection_stage")
             elif sb == "underdog":
+                _archive_line_changes_underdog(conn)
                 _sync_underdog_from_stage(conn)
                 _archive_missing_from_stage(conn, "underdog", "underdog_projection_stage")
             else:
+                _archive_line_changes_parlay_play(conn)
                 _sync_parlay_play_from_stage(conn)
                 _archive_missing_from_stage(conn, "parlay_play", "parlay_play_projection_stage")
             _archive_started_projections(conn)
