@@ -41,6 +41,26 @@ CREATE INDEX IF NOT EXISTS idx_prop_lines_scraped_at
 CREATE INDEX IF NOT EXISTS idx_events_game_date
   ON events(game_date);
 
+-- Unified player projections: one row per event/player/stat with all books tied together
+CREATE TABLE IF NOT EXISTS player_projections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL,
+  player_name TEXT NOT NULL,
+  stat_type TEXT NOT NULL,
+  books_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(event_id, player_name, stat_type),
+  FOREIGN KEY (event_id) REFERENCES events(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_player_projections_event
+  ON player_projections(event_id);
+CREATE INDEX IF NOT EXISTS idx_player_projections_player
+  ON player_projections(player_name);
+CREATE INDEX IF NOT EXISTS idx_player_projections_stat
+  ON player_projections(stat_type);
+
 -- Seed books
 INSERT OR IGNORE INTO books (id, name, slug) VALUES (1, 'PrizePicks', 'prizepicks');
 INSERT OR IGNORE INTO books (id, name, slug) VALUES (2, 'Underdog', 'underdog');
