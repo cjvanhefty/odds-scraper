@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from sportsbook_projection_sync import sync_sportsbook_projection_snapshot
 
 # Common league IDs (from Prize Picks)
 LEAGUES = {
@@ -1383,6 +1384,11 @@ def main():
         help="SQL Server instance (default: localhost\\SQLEXPRESS)",
     )
     parser.add_argument(
+        "--database",
+        default=os.environ.get("PROPS_DATABASE", "Props"),
+        help="Database name (default: Props or PROPS_DATABASE)",
+    )
+    parser.add_argument(
         "--db-user",
         default=os.environ.get("PROPS_DB_USER", "dbadmin"),
         help="Database user (default: dbadmin or PROPS_DB_USER)",
@@ -1470,6 +1476,7 @@ def main():
         print(f"Saved raw API response to {path}")
 
     if args.db:
+        db_name = (getattr(args, "database", None) or os.environ.get("PROPS_DATABASE", "Props")).strip() or "Props"
         if args.all_leagues:
             records = all_projection_records
             player_records = list(all_player_records.values())
@@ -1484,7 +1491,7 @@ def main():
             n = insert_projection_stage(
                 records,
                 server=args.db_server,
-                database="Props",
+                database=db_name,
                 user=args.db_user,
                 password=args.db_password,
                 trusted_connection=trusted,
@@ -1492,7 +1499,7 @@ def main():
             print(f"Loaded {n} rows into prizepicks_projection_stage")
             merge_count, history_count, moved_count, deleted_count = upsert_projection_from_stage(
                 server=args.db_server,
-                database="Props",
+                database=db_name,
                 user=args.db_user,
                 password=args.db_password,
                 trusted_connection=trusted,
@@ -1504,7 +1511,7 @@ def main():
                 pn = insert_player_stage(
                     player_records,
                     server=args.db_server,
-                    database="Props",
+                    database=db_name,
                     user=args.db_user,
                     password=args.db_password,
                     trusted_connection=trusted,
@@ -1512,7 +1519,7 @@ def main():
                 print(f"Loaded {pn} rows into prizepicks_player_stage")
                 p_merge = upsert_player_from_stage(
                     server=args.db_server,
-                    database="Props",
+                    database=db_name,
                     user=args.db_user,
                     password=args.db_password,
                     trusted_connection=trusted,
@@ -1527,7 +1534,7 @@ def main():
                 gn = insert_game_stage(
                     game_records,
                     server=args.db_server,
-                    database="Props",
+                    database=db_name,
                     user=args.db_user,
                     password=args.db_password,
                     trusted_connection=trusted,
@@ -1535,7 +1542,7 @@ def main():
                 print(f"Loaded {gn} rows into prizepicks_game_stage")
                 g_merge = upsert_game_from_stage(
                     server=args.db_server,
-                    database="Props",
+                    database=db_name,
                     user=args.db_user,
                     password=args.db_password,
                     trusted_connection=trusted,
@@ -1549,7 +1556,7 @@ def main():
             ref_counts = insert_included_reference_stages(
                 ref,
                 server=args.db_server,
-                database="Props",
+                database=db_name,
                 user=args.db_user,
                 password=args.db_password,
                 trusted_connection=trusted,
@@ -1557,12 +1564,21 @@ def main():
             print(f"Loaded included reference stages: {ref_counts}")
             merge_included_reference_from_stage(
                 server=args.db_server,
-                database="Props",
+                database=db_name,
                 user=args.db_user,
                 password=args.db_password,
                 trusted_connection=trusted,
             )
             print("MergePrizepicksIncludedReferenceFromStage completed")
+            unified_count = sync_sportsbook_projection_snapshot(
+                "prizepicks",
+                server=args.db_server,
+                database=db_name,
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Synchronized {unified_count} rows into sportsbook_projection for prizepicks")
         except Exception as e:
             print(f"DB failed: {e}")
             import traceback

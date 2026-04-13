@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cross_book_stat_normalize import normalize_stat_basic
+from sportsbook_projection_sync import sync_sportsbook_projection_snapshot
 
 CHICAGO = ZoneInfo("America/Chicago")
 
@@ -1677,7 +1678,6 @@ def main():
             trusted_connection=trusted,
         )
         print(f"Merged {m} rows into underdog_projection")
-
         # Insert supporting entities into their stage tables if we have them
         try:
             from typing import Iterable  # noqa: F401  (only for type checkers)
@@ -1886,6 +1886,15 @@ def main():
                 trusted_connection=trusted,
             )
             print(f"Merged {solo_merged} rows into underdog_solo_game")
+        unified_count = sync_sportsbook_projection_snapshot(
+            "underdog",
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Synchronized {unified_count} rows into sportsbook_projection for underdog")
 
     return 0
 

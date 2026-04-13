@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from cross_book_stat_normalize import normalize_stat_basic
+from sportsbook_projection_sync import sync_sportsbook_projection_snapshot
 
 CHICAGO = ZoneInfo("America/Chicago")
 CHICAGO_FMT = "%m/%d/%Y %H:%M:%S"  # 03/17/2026 17:06:00
@@ -1622,6 +1623,15 @@ def main():
                 trusted_connection=trusted,
             )
             print(f"Merged {m} rows into parlay_play_projection")
+        unified_count = sync_sportsbook_projection_snapshot(
+            "parlay_play",
+            server=args.db_server,
+            database=args.database,
+            user=args.db_user,
+            password=args.db_password,
+            trusted_connection=trusted,
+        )
+        print(f"Synchronized {unified_count} rows into sportsbook_projection for parlay_play")
     return 0
 
 

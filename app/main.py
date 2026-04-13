@@ -41,7 +41,12 @@ from projection_over_streak import (
 
 from app.db import get_conn
 
-from cross_book_stat_normalize import normalize_for_join, parlay_match_league_id_for_prizepicks
+from cross_book_stat_normalize import (
+    normalize_for_join,
+    normalize_stat_basic,
+    parlay_match_league_id_for_prizepicks,
+    prizepicks_league_display_name,
+)
 
 
 def _lookup_parlay_line(
@@ -105,6 +110,331 @@ def _parlay_slate_date_bounds(projections: list) -> tuple[str, str] | None:
     return (lo.isoformat(), hi.isoformat())
 
 
+SPORTSBOOK_KEYS = ("prizepicks", "underdog", "parlay_play")
+
+
+def _serialize_datetime(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None).isoformat()
+    if hasattr(val, "isoformat"):
+        try:
+            return val.isoformat()
+        except Exception:
+            return str(val)
+    return str(val)
+
+
+def _projection_choice_score(sportsbook: str, odds_type: str | None, start_time_val) -> tuple[int, str]:
+    sb = (sportsbook or "").strip().lower()
+    odds = (odds_type or "").strip().lower()
+    if sb == "prizepicks":
+        odds_rank = 0 if odds == "standard" else 1
+    elif sb == "parlay_play":
+        odds_rank = 0 if odds in ("main", "") else 1
+    else:
+        odds_rank = 0
+    return (odds_rank, _serialize_datetime(start_time_val) or "")
+
+
+def _resolve_parlay_play_match_pk(conn) -> str:
+    """Return `id` or `parlay_play_match_id` depending on how dbo.parlay_play_match was created."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = 'parlay_play_match'
+              AND COLUMN_NAME IN ('id', 'parlay_play_match_id')
+            """
+        )
+        match_pk_cols = {r[0] for r in cursor.fetchall()}
+        if "id" in match_pk_cols:
+            return "id"
+        if "parlay_play_match_id" in match_pk_cols:
+            return "parlay_play_match_id"
+    finally:
+        cursor.close()
+    raise RuntimeError(
+        "Cannot resolve PK column for dbo.parlay_play_match. "
+        "Expected 'id' or 'parlay_play_match_id'."
+    )
+
+
+def _resolve_parlay_play_league_pk(conn) -> str:
+    """Return `id` or `parlay_play_league_id` depending on how dbo.parlay_play_league was created."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = 'parlay_play_league'
+              AND COLUMN_NAME IN ('id', 'parlay_play_league_id')
+            """
+        )
+        cols = {r[0] for r in cursor.fetchall()}
+        if "id" in cols:
+            return "id"
+        if "parlay_play_league_id" in cols:
+            return "parlay_play_league_id"
+    finally:
+        cursor.close()
+    raise RuntimeError(
+        "Cannot resolve PK column for dbo.parlay_play_league. "
+        "Expected 'id' or 'parlay_play_league_id'."
+    )
+
+
+def _parlay_play_match_pk_safe(conn) -> str:
+    """Resolve Parlay match PK column; fall back to ``id`` if INFORMATION_SCHEMA lookup fails (same as unified query)."""
+    try:
+        return _resolve_parlay_play_match_pk(conn)
+    except RuntimeError:
+        return "id"
+
+
+def _parlay_play_league_pk_safe(conn) -> str:
+    """Resolve Parlay league PK column; fall back to ``id`` if INFORMATION_SCHEMA lookup fails (same as unified query)."""
+    try:
+        return _resolve_parlay_play_league_pk(conn)
+    except RuntimeError:
+        return "id"
+
+
+def _league_label_unified(row: dict) -> str | None:
+    """Prefer league text from SQL (e.g. Parlay Play league name); else PrizePicks id label."""
+    text = (row.get("league") or "").strip()
+    if text:
+        return text
+    return prizepicks_league_display_name(row.get("league_id"))
+
+
+def _fetch_unified_projection_rows(
+    conn,
+    league_id_list: list[int] | None,
+    include_all_odds: bool,
+    player_name: str | None,
+    active_only: bool,
+) -> list[dict]:
+    now_central = "CAST(GETUTCDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2(0))"
+    where_parts = [
+        "sp.player_name IS NOT NULL",
+        "LTRIM(RTRIM(sp.player_name)) <> N''",
+        f"sp.start_time >= DATEADD(day, -30, CAST({now_central} AS DATE))",
+    ]
+    params: list = []
+    if active_only:
+        where_parts.append(f"sp.start_time >= {now_central}")
+    if not include_all_odds:
+        where_parts.append(
+            "("
+            "(sp.sportsbook <> N'prizepicks' OR LOWER(LTRIM(RTRIM(COALESCE(sp.odds_type, N'')))) = N'standard') "
+            "AND "
+            "(sp.sportsbook <> N'parlay_play' OR LOWER(LTRIM(RTRIM(COALESCE(sp.odds_type, N'main')))) = N'main')"
+            ")"
+        )
+    if league_id_list:
+        placeholders = ",".join("?" * len(league_id_list))
+        where_parts.append(f"sp.league_id IN ({placeholders})")
+        params.extend(league_id_list)
+    if player_name and player_name.strip():
+        where_parts.append("LOWER(LTRIM(RTRIM(sp.player_name))) = LOWER(?)")
+        params.append(player_name.strip())
+    where_sql = " AND ".join(where_parts)
+    match_pk = _parlay_play_match_pk_safe(conn)
+    league_pk = _parlay_play_league_pk_safe(conn)
+    sql = f"""
+        SELECT
+            sp.sportsbook,
+            sp.external_projection_id,
+            sp.source_player_id,
+            sp.source_game_id,
+            sp.player_name,
+            sp.stat_type_name,
+            sp.line_score,
+            sp.odds_type,
+            sp.start_time,
+            sp.league_id,
+            CASE
+                WHEN sp.sportsbook = N'parlay_play' THEN
+                    COALESCE(
+                        NULLIF(LTRIM(RTRIM(l_match.league_name_short)), N''),
+                        NULLIF(LTRIM(RTRIM(l_match.league_name)), N''),
+                        NULLIF(LTRIM(RTRIM(l_sid.league_name_short)), N''),
+                        NULLIF(LTRIM(RTRIM(l_sid.league_name)), N'')
+                    )
+                WHEN sp.sportsbook = N'prizepicks' THEN
+                    NULLIF(LTRIM(RTRIM(
+                        CASE
+                            WHEN COALESCE(
+                                    NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                    NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                ) IS NOT NULL
+                                 AND NULLIF(LTRIM(RTRIM(ppdur.name)), N'') IS NOT NULL
+                                THEN CONCAT(
+                                    COALESCE(
+                                        NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                        NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                    ),
+                                    N' · ',
+                                    LTRIM(RTRIM(ppdur.name))
+                                )
+                            WHEN COALESCE(
+                                    NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                    NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                ) IS NOT NULL
+                                THEN COALESCE(
+                                    NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                    NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                )
+                            WHEN NULLIF(LTRIM(RTRIM(ppdur.name)), N'') IS NOT NULL
+                                THEN LTRIM(RTRIM(ppdur.name))
+                            ELSE NULL
+                        END
+                    )), N'')
+                ELSE NULL
+            END AS league,
+            sp.team,
+            sp.team_name,
+            sp.home_abbreviation,
+            sp.away_abbreviation,
+            sp.opponent_abbreviation,
+            sp.home_away,
+            sp.event_name
+        FROM [dbo].[sportsbook_projection] sp
+        LEFT JOIN [dbo].[parlay_play_match] m
+            ON sp.sportsbook = N'parlay_play'
+           AND m.[{match_pk}] = TRY_CAST(
+                NULLIF(LTRIM(RTRIM(CAST(sp.source_game_id AS nvarchar(50)))), N'') AS bigint
+            )
+        LEFT JOIN [dbo].[parlay_play_league] l_match
+            ON sp.sportsbook = N'parlay_play'
+           AND l_match.[{league_pk}] = m.league_id
+        LEFT JOIN [dbo].[parlay_play_league] l_sid
+            ON sp.sportsbook = N'parlay_play'
+           AND l_sid.[{league_pk}] = sp.league_id
+        LEFT JOIN [dbo].[prizepicks_projection] pproj
+            ON sp.sportsbook = N'prizepicks'
+           AND pproj.projection_id = sp.external_projection_id
+        LEFT JOIN [dbo].[prizepicks_league] pl
+            ON sp.sportsbook = N'prizepicks'
+           AND LTRIM(RTRIM(pl.league_id)) = LTRIM(RTRIM(CONVERT(nvarchar(20), sp.league_id)))
+        LEFT JOIN [dbo].[prizepicks_duration] ppdur
+            ON sp.sportsbook = N'prizepicks'
+           AND ppdur.duration_id = CONVERT(nvarchar(20), pproj.duration_id)
+        WHERE {where_sql}
+        ORDER BY sp.start_time, sp.player_name, sp.stat_type_name, sp.sportsbook, sp.external_projection_id
+    """
+    cursor = conn.cursor()
+    cursor.execute(sql, params)
+    columns = [c[0] for c in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _group_player_projections(rows: list[dict], stat_type_filter: str | None) -> list[dict]:
+    wanted_stat = normalize_for_join((stat_type_filter or "").strip()) if stat_type_filter and stat_type_filter.strip() else None
+    grouped: dict[tuple, dict] = {}
+    player_order: list[tuple] = []
+    for row in rows:
+        player_name = (row.get("player_name") or "").strip()
+        if not player_name:
+            continue
+        stat_type_name = (row.get("stat_type_name") or "").strip()
+        stat_key = normalize_for_join(stat_type_name)
+        if not stat_key:
+            continue
+        if wanted_stat and stat_key != wanted_stat:
+            continue
+        # Group by name *and* league so the same display name in NBA vs MLB (or any two sports)
+        # does not share one bucket; otherwise the parent's league_id can tag the wrong sport's stats.
+        pkey = (player_name.lower(), row.get("league_id"))
+        player_item = grouped.get(pkey)
+        if player_item is None:
+            player_item = {
+                "display_name": player_name,
+                "player": player_name,
+                "team": row.get("team"),
+                "team_name": row.get("team_name"),
+                "league_id": row.get("league_id"),
+                "league": _league_label_unified(row),
+                "game": {
+                    "start_time": _serialize_datetime(row.get("start_time")),
+                    "event_name": row.get("event_name"),
+                    "home_abbreviation": row.get("home_abbreviation"),
+                    "away_abbreviation": row.get("away_abbreviation"),
+                    "opponent_abbreviation": row.get("opponent_abbreviation"),
+                    "home_away": row.get("home_away"),
+                },
+                "__stats": {},
+                "__source_rank": 999,
+            }
+            grouped[pkey] = player_item
+            player_order.append(pkey)
+        sportsbook = (row.get("sportsbook") or "").strip().lower()
+        rank = 0 if sportsbook == "prizepicks" else (1 if sportsbook == "underdog" else (2 if sportsbook == "parlay_play" else 3))
+        if rank < player_item["__source_rank"]:
+            player_item["team"] = row.get("team")
+            player_item["team_name"] = row.get("team_name")
+            player_item["league_id"] = row.get("league_id")
+            player_item["league"] = _league_label_unified(row)
+            player_item["game"] = {
+                "start_time": _serialize_datetime(row.get("start_time")),
+                "event_name": row.get("event_name"),
+                "home_abbreviation": row.get("home_abbreviation"),
+                "away_abbreviation": row.get("away_abbreviation"),
+                "opponent_abbreviation": row.get("opponent_abbreviation"),
+                "home_away": row.get("home_away"),
+            }
+            player_item["__source_rank"] = rank
+        stat_item = player_item["__stats"].get(stat_key)
+        if stat_item is None:
+            stat_item = {
+                "stat_type_name": normalize_stat_basic(stat_type_name) or stat_type_name,
+                "stat_type_key": stat_key,
+                "sportsbook_projections": {k: None for k in SPORTSBOOK_KEYS},
+                "__book_scores": {},
+            }
+            player_item["__stats"][stat_key] = stat_item
+        elif sportsbook == "prizepicks":
+            stat_item["stat_type_name"] = normalize_stat_basic(stat_type_name) or stat_type_name
+        if sportsbook not in SPORTSBOOK_KEYS:
+            continue
+        payload = {
+            "projection_id": _json_safe(row.get("external_projection_id")),
+            "line_score": _json_safe(row.get("line_score")),
+            "odds_type": row.get("odds_type"),
+            "source_player_id": row.get("source_player_id"),
+            "source_game_id": row.get("source_game_id"),
+            "start_time": _serialize_datetime(row.get("start_time")),
+            "league_id": row.get("league_id"),
+            "event_name": row.get("event_name"),
+        }
+        score = _projection_choice_score(sportsbook, row.get("odds_type"), row.get("start_time"))
+        existing = stat_item["__book_scores"].get(sportsbook)
+        if existing is None or score < existing:
+            stat_item["sportsbook_projections"][sportsbook] = payload
+            stat_item["__book_scores"][sportsbook] = score
+    out: list[dict] = []
+    for pkey in player_order:
+        player_item = grouped[pkey]
+        stats: list[dict] = []
+        for stat in player_item["__stats"].values():
+            stat.pop("__book_scores", None)
+            stats.append(stat)
+        stats.sort(key=lambda s: ((s.get("stat_type_name") or ""), (s.get("stat_type_key") or "")))
+        player_item.pop("__stats", None)
+        player_item.pop("__source_rank", None)
+        player_item["projections"] = stats
+        out.append(player_item)
+    out.sort(key=lambda r: ((r.get("game", {}).get("start_time") or ""), (r.get("display_name") or "")))
+    return out
+
+
 def get_parlay_play_lines_by_match(
     conn,
     date_from: str | None = None,
@@ -120,6 +450,8 @@ def get_parlay_play_lines_by_match(
     """
     cursor = conn.cursor()
     try:
+        match_pk = _parlay_play_match_pk_safe(conn)
+
         if date_from is None or date_to is None:
             end = datetime.now(timezone.utc).date()
             start = end - timedelta(days=45)
@@ -129,12 +461,12 @@ def get_parlay_play_lines_by_match(
         # Rows are merged into dicts with last-write-wins. ORDER BY main-last (non-main rows first) so the
         # final line_score per key is is_main_line=1, matching PrizePicks/Underdog standard odds.
         cursor.execute(
-            """
+            f"""
             SELECT m.league_id, p.display_name, p.stat_type_name,
                    CONVERT(varchar(10), CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
                    p.line_score
             FROM [dbo].[parlay_play_projection] p
-            INNER JOIN [dbo].[parlay_play_match] m ON m.id = p.match_id
+            INNER JOIN [dbo].[parlay_play_match] m ON m.[{match_pk}] = p.match_id
             WHERE p.display_name IS NOT NULL AND p.stat_type_name IS NOT NULL
               AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) >= ?
               AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) <= ?
@@ -282,6 +614,7 @@ def list_projections(
     page: int = Query(1, ge=1, description="Page number (used when page_size > 0)"),
     page_size: int = Query(0, ge=0, le=500, description="Rows per page; 0 = return all (no paging)"),
     full_list: bool = Query(False, description="If True and not filtering by player, return all projections (no dedupe) for client-side filtering"),
+    use_unified_projection_store: bool = Query(False, description="Read from sportsbook_projection unified table."),
 ):
     """Return PrizePicks projections with favored/risk from last N games. When page_size > 0, returns { items, total, page, page_size }.
     When league_ids is omitted or empty, returns all leagues (for grid client-side sport filter). When set, filters by those leagues."""
@@ -292,6 +625,23 @@ def list_projections(
             league_id_list = _parse_league_ids(league_id, league_ids)
         conn = get_conn()
         active_only = not (player_name and player_name.strip())
+        if use_unified_projection_store:
+            unified_rows = _fetch_unified_projection_rows(
+                conn=conn,
+                league_id_list=league_id_list,
+                include_all_odds=include_all_odds,
+                player_name=player_name,
+                active_only=active_only,
+            )
+            grouped = _group_player_projections(unified_rows, stat_type)
+            if page_size > 0:
+                total = len(grouped)
+                start = (page - 1) * page_size
+                end = start + page_size
+                items = grouped[start:end]
+                body = {"items": items, "total": total, "page": page, "page_size": page_size}
+                return JSONResponse(content=body)
+            return JSONResponse(content=grouped)
         projections = get_projections(
             conn,
             league_id=league_id_list,
@@ -364,6 +714,10 @@ def list_projections(
                     row[k] = float(v) if v is not None else None
                 else:
                     row[k] = v
+            if not (row.get("league") or "").strip():
+                ln = prizepicks_league_display_name(row.get("league_id"))
+                if ln:
+                    row["league"] = ln
             # line_underdog comes from get_projections (join via [player].underdog_player_id)
             display_name = (r.get("display_name") or r.get("pp_name") or "").strip()
             stat_type_name = normalize_for_join((r.get("stat_type_name") or "").strip())
@@ -589,56 +943,68 @@ def get_projections_last_updated():
 
 @app.post("/api/update/projections")
 def update_projections():
-    """Run prizepicks_scraper.py --all-leagues --db to fetch all sports. Uses same DB auth as NBA stats."""
-    env = os.environ.copy()
-    server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
-    user = env.get("PROPS_DB_USER", "dbadmin")
-    password = env.get("PROPS_DB_PASSWORD", "")
-    trusted = env.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
-    use_browser = env.get("PROPS_PRIZEPICKS_USE_BROWSER", "").strip().lower() in ("1", "true", "yes")
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "prizepicks_scraper.py"),
+    """Run prizepicks_scraper in-process (avoids debugger subprocess issues)."""
+    server = os.environ.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
+    user = os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = os.environ.get("PROPS_DB_PASSWORD", "")
+    trusted = os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
+    use_browser = os.environ.get("PROPS_PRIZEPICKS_USE_BROWSER", "").strip().lower() in ("1", "true", "yes")
+    database = os.environ.get("PROPS_DATABASE", "Props")
+
+    argv = [
+        "prizepicks_scraper.py",
         "--all-leagues",
         "--db",
         "--db-server", server,
+        "--database", database,
         "--db-user", user,
         "--db-password", password,
     ]
     if trusted:
-        cmd.append("--trusted-connection")
+        argv.append("--trusted-connection")
     if use_browser:
-        cmd.append("--browser")
+        argv.append("--browser")
+
+    from io import StringIO
+    old_argv = sys.argv
+    old_stdout = sys.stdout
+    sys.argv = argv
+    sys.stdout = StringIO()
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=300 if use_browser else 180,
-            env=env,
-        )
-        if result.returncode != 0:
-            err = result.stderr or result.stdout or ""
-            if "Login failed for user" in err or "18456" in err:
-                detail = (
-                    "Database login failed. Use the same credentials as NBA stats: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
-                    "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Restart the app after setting env. "
-                    "Original error: " + err[:400]
-                )
-            elif "403" in err or "Forbidden" in err:
-                detail = (
-                    "PrizePicks may be blocking the request. Set PROPS_PRIZEPICKS_USE_BROWSER=1 and restart the app. "
-                    "Original error: " + err[:400]
-                )
-            else:
-                detail = f"Scraper exited {result.returncode}: {err[:500]}"
-            raise HTTPException(status_code=502, detail=detail)
-        return {"ok": True, "message": "Projections updated", "log": result.stdout}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Update timed out")
+        import prizepicks_scraper
+        exit_code = prizepicks_scraper.main()
+        out = sys.stdout.getvalue()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        out = sys.stdout.getvalue()
+        tail = (out or "").strip()
+        if len(tail) > 2500:
+            tail = tail[-2500:]
+        detail = (str(e) or "Scraper failed").strip()
+        if tail:
+            detail += "\n\n--- scraper log (tail) ---\n" + tail
+        raise HTTPException(status_code=500, detail=detail[:3500])
+    finally:
+        sys.argv = old_argv
+        sys.stdout = old_stdout
+
+    if exit_code != 0:
+        tail = (out or "").strip()
+        if len(tail) > 3500:
+            tail = tail[-3500:]
+        if "Login failed for user" in out or "18456" in out:
+            detail = (
+                "Database login failed. Use the same credentials as NBA stats: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
+                "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Original error: " + out[:400]
+            )
+        elif "403" in out or "Forbidden" in out:
+            detail = (
+                "PrizePicks may be blocking the request. Set PROPS_PRIZEPICKS_USE_BROWSER=1 and restart the app. "
+                "Original error: " + out[:400]
+            )
+        else:
+            detail = f"Scraper exited {exit_code}.\n\n--- scraper log (tail) ---\n{tail}"
+        raise HTTPException(status_code=502, detail=detail)
+    return {"ok": True, "message": "Projections updated", "log": out}
 
 
 class NbaStatsUpdateBody(BaseModel):
@@ -709,63 +1075,95 @@ def update_parlayplay_projections():
 @app.post("/api/update/underdog-projections")
 def update_underdog_projections():
     """Run underdog_scraper.py --db (tries httpx first, falls back to browser on 401/403). Set PROPS_UNDERDOG_USER_DATA_DIR for saved login fallback."""
-    env = os.environ.copy()
-    server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
-    user = env.get("PROPS_DB_USER", "dbadmin")
-    password = env.get("PROPS_DB_PASSWORD", "")
-    trusted = env.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
-    user_data_dir = env.get("PROPS_UNDERDOG_USER_DATA_DIR", "").strip()
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "underdog_scraper.py"),
+    # Run in-process to avoid debugpy/pydevd subprocess interception (which returns 502).
+    # We still enforce an HTTP timeout to keep the API responsive.
+    server = os.environ.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
+    user = os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = os.environ.get("PROPS_DB_PASSWORD", "")
+    trusted = os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
+    user_data_dir = os.environ.get("PROPS_UNDERDOG_USER_DATA_DIR", "").strip()
+    connect_url = os.environ.get("PROPS_BROWSER_CDP", "").strip()
+
+    argv = [
+        "underdog_scraper.py",
         "--db",
         "--db-server", server,
         "--db-user", user,
         "--db-password", password,
     ]
     if trusted:
-        cmd.append("--trusted-connection")
+        argv.append("--trusted-connection")
     if user_data_dir:
-        cmd.extend(["--user-data-dir", user_data_dir])
+        argv.extend(["--user-data-dir", user_data_dir])
+    if connect_url:
+        argv.extend(["--connect", connect_url])
+
+    timeout_s = 180 if user_data_dir else 120
+
+    from io import StringIO
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+    old_argv = sys.argv
+    old_stdout = sys.stdout
+    sys.argv = argv
+    sys.stdout = StringIO()
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=180 if user_data_dir else 120,
-            env=env,
-        )
-        if result.returncode != 0:
-            err = result.stderr or result.stdout or ""
-            if "Login failed for user" in err or "18456" in err:
-                detail = (
-                    "Database login failed. Use same credentials as NBA/PrizePicks: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
-                    "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Restart the app after setting env. "
-                    "Original error: " + err[:400]
-                )
-            else:
-                detail = f"Scraper exited {result.returncode}: {err[:500]}"
-            raise HTTPException(status_code=502, detail=detail)
-        out = result.stdout or ""
-        if "Fetched 0 projection records via API." in out:
-            return {"ok": True, "message": "Underdog projections updated (0 lines).", "log": result.stdout}
-        if "No records after browser fallback" in out:
-            return {"ok": True, "message": "Underdog: 0 records after browser fallback (session may be expired). Run from CLI with --browser --headed to log in.", "log": result.stdout}
-        if "0 projection records" in out or "No records." in out:
-            msg = "Underdog: 0 records."
-            if "401" in out or "unauthorized" in out.lower():
-                msg = "Underdog: 0 records (session expired or not logged in). Run from CLI: python underdog_scraper.py --browser --user-data-dir .playwright-underdog --headed — log in, press Enter. Then try Update Underdog again."
-            elif "403" in out or "forbidden" in out.lower():
-                msg = "Underdog: 0 records (403 forbidden). Log in again with --headed, then try Update Underdog again."
-            else:
-                msg = "Underdog: 0 records. Set PROPS_UNDERDOG_USER_DATA_DIR=.playwright-underdog and restart. First time: run from CLI with --headed to log in."
-            return {"ok": True, "message": msg, "log": result.stdout}
-        return {"ok": True, "message": "Underdog projections updated", "log": result.stdout}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Update timed out")
+        import underdog_scraper
+
+        def _run():
+            return underdog_scraper.main()
+
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_run)
+            try:
+                exit_code = fut.result(timeout=timeout_s)
+            except FutureTimeoutError:
+                raise HTTPException(status_code=504, detail="Update timed out")
+
+        out = sys.stdout.getvalue()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        out = sys.stdout.getvalue()
+        tail = (out or "").strip()
+        if len(tail) > 2500:
+            tail = tail[-2500:]
+        detail = (str(e) or "Underdog scraper failed").strip()
+        if tail:
+            detail += "\n\n--- scraper log (tail) ---\n" + tail
+        raise HTTPException(status_code=500, detail=detail[:3500])
+    finally:
+        sys.argv = old_argv
+        sys.stdout = old_stdout
+
+    if exit_code != 0:
+        tail = (out or "").strip()
+        if len(tail) > 3500:
+            tail = tail[-3500:]
+        if "Login failed for user" in out or "18456" in out:
+            detail = (
+                "Database login failed. Use same credentials as NBA/PrizePicks: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
+                "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Restart the app after setting env. "
+                "Original error: " + out[:600]
+            )
+        else:
+            detail = f"Scraper exited {exit_code}.\n\n--- scraper log (tail) ---\n{tail}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    if "Fetched 0 projection records via API." in out:
+        return {"ok": True, "message": "Underdog projections updated (0 lines).", "log": out}
+    if "No records after browser fallback" in out:
+        return {"ok": True, "message": "Underdog: 0 records after browser fallback (session may be expired). Run from CLI with --browser --headed to log in.", "log": out}
+    if "0 projection records" in out or "No records." in out:
+        msg = "Underdog: 0 records."
+        if "401" in out or "unauthorized" in out.lower():
+            msg = "Underdog: 0 records (session expired or not logged in). Run from CLI: python underdog_scraper.py --browser --user-data-dir .playwright-underdog --headed — log in, press Enter. Then try Update Underdog again."
+        elif "403" in out or "forbidden" in out.lower():
+            msg = "Underdog: 0 records (403 forbidden). Log in again with --headed, then try Update Underdog again."
+        else:
+            msg = "Underdog: 0 records. Set PROPS_UNDERDOG_USER_DATA_DIR=.playwright-underdog and restart. First time: run from CLI with --headed to log in."
+        return {"ok": True, "message": msg, "log": out}
+    return {"ok": True, "message": "Underdog projections updated", "log": out}
 
 
 @app.post("/api/update/nba-stats")
