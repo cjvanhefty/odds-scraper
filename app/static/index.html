@@ -340,10 +340,67 @@
 
     let currentPage = 1;
 
+    function normalizeProjectionRows(raw) {
+      var list = (raw && Array.isArray(raw.items)) ? raw.items : (Array.isArray(raw) ? raw : []);
+      if (list.length === 0) return [];
+      var first = list[0] || {};
+      // Unified shape: one row per player with nested projections by stat.
+      if (Array.isArray(first.projections) && (first.player || first.display_name) && !first.stat_type_name) {
+        var flat = [];
+        list.forEach(function (playerRow) {
+          var game = playerRow.game || {};
+          var playerName = (playerRow.display_name || playerRow.player || '').trim();
+          (playerRow.projections || []).forEach(function (statRow) {
+            var books = statRow.sportsbook_projections || {};
+            var pp = books.prizepicks || null;
+            var ud = books.underdog || null;
+            var pl = books.parlay_play || null;
+            var startTime = game.start_time || (pp && pp.start_time) || (ud && ud.start_time) || (pl && pl.start_time) || null;
+            var leagueId = playerRow.league_id;
+            if (leagueId == null) {
+              leagueId = (pp && pp.league_id != null) ? pp.league_id
+                : (ud && ud.league_id != null) ? ud.league_id
+                : (pl && pl.league_id != null) ? pl.league_id
+                : null;
+            }
+            flat.push({
+              display_name: playerName,
+              pp_name: playerName,
+              stat_type_name: statRow.stat_type_name || statRow.stat_type_key || '',
+              start_time: startTime,
+              league_id: leagueId,
+              team: playerRow.team || null,
+              team_name: playerRow.team_name || null,
+              home_abbreviation: game.home_abbreviation || null,
+              away_abbreviation: game.away_abbreviation || null,
+              opponent_abbreviation: game.opponent_abbreviation || null,
+              home_away: game.home_away || null,
+              description: game.event_name || null,
+              line_score: (pp && pp.line_score != null) ? pp.line_score : null,
+              line_underdog: (ud && ud.line_score != null) ? ud.line_score : null,
+              line_parlay_play: (pl && pl.line_score != null) ? pl.line_score : null,
+              projection_id: pp ? pp.projection_id : null,
+              odds_type: pp ? pp.odds_type : null,
+              favored: false,
+              risk: null,
+              cushion: null,
+              last_n_values: [],
+              last_n_dates: [],
+              last_n_opponents: [],
+              last_n_projection_lines: [],
+            });
+          });
+        });
+        return flat;
+      }
+      return list;
+    }
+
     function getParams() {
       const params = new URLSearchParams();
       params.set('full_list', 'true');
       params.set('page_size', '0');
+      params.set('use_unified_projection_store', 'true');
       // Always fetch all leagues so the UI can render a button for each active sport.
       // Sport filtering is handled client-side via selectedLeagueId.
       return params;
@@ -510,7 +567,7 @@
           throw new Error(msg || res.statusText);
         }
         const raw = await res.json();
-        currentProjections = (raw && Array.isArray(raw.items)) ? raw.items : (Array.isArray(raw) ? raw : []);
+        currentProjections = normalizeProjectionRows(raw);
         renderSportFilters();
         updateMainStatList();
         renderTableFromCurrent();
@@ -590,10 +647,11 @@
       params.set('player_name', playerName);
       params.set('include_all_odds', 'true');
       params.set('skip_streak', 'true');
+      params.set('use_unified_projection_store', 'true');
       try {
         var res = await fetch(API + '/api/projections?' + params.toString());
         if (!res.ok) throw new Error(await res.text());
-        var list = await res.json();
+        var list = normalizeProjectionRows(await res.json());
         modalState.list = list;
         var haveStreakFromGrid = mergeStreakFromGridIntoModalList(list);
         if (haveStreakFromGrid) modalState.streakLoading = false;
@@ -619,7 +677,7 @@
           var teamName = (first.team_name || '').trim();
           if (team && teamName && team !== teamName) team = team + ' – ' + teamName;
           else if (!team && teamName) team = teamName;
-          var matchup = (first.description || '').trim();
+          var matchup = (first.description || first.event_name || '').trim();
           var startTime = first.start_time ? new Date(first.start_time).toLocaleString() : '';
           var rows = [];
           if (team) rows.push('<span class="modal-info-label">Team</span><span class="modal-info-value">' + escapeHtml(team) + '</span>');
