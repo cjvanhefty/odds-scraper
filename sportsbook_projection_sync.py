@@ -144,6 +144,59 @@ def ensure_sportsbook_projection_table(conn) -> None:
     conn.commit()
 
 
+def _archive_missing_from_stage(conn, sportsbook: str, stage_table: str) -> None:
+    """Archive rows not present in the latest sportsbook stage snapshot, then delete them."""
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        DECLARE @nowCentral datetime2(7) =
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
+
+        IF EXISTS (SELECT 1 FROM [dbo].[{stage_table}])
+        BEGIN
+            INSERT INTO [dbo].[sportsbook_projection_history](
+                sportsbook, external_projection_id, source_player_id, source_game_id,
+                player_name, stat_type_name, line_score, odds_type, start_time, league_id,
+                team, team_name, home_abbreviation, away_abbreviation, opponent_abbreviation,
+                home_away, event_name, extra_json, created_at, last_modified_at,
+                archived_at, archive_reason
+            )
+            SELECT
+                p.sportsbook, p.external_projection_id, p.source_player_id, p.source_game_id,
+                p.player_name, p.stat_type_name, p.line_score, p.odds_type, p.start_time, p.league_id,
+                p.team, p.team_name, p.home_abbreviation, p.away_abbreviation, p.opponent_abbreviation,
+                p.home_away, p.event_name, p.extra_json, p.created_at, p.last_modified_at,
+                @nowCentral, N'no_longer_active'
+            FROM [dbo].[sportsbook_projection] p
+            WHERE p.sportsbook = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM [dbo].[{stage_table}] s
+                  WHERE CAST(s.projection_id AS bigint) = p.external_projection_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM [dbo].[sportsbook_projection_history] h
+                  WHERE h.sportsbook = p.sportsbook
+                    AND h.external_projection_id = p.external_projection_id
+                    AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+                    AND h.archive_reason = N'no_longer_active'
+              );
+
+            DELETE p
+            FROM [dbo].[sportsbook_projection] p
+            WHERE p.sportsbook = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM [dbo].[{stage_table}] s
+                  WHERE CAST(s.projection_id AS bigint) = p.external_projection_id
+              );
+        END;
+        """,
+        (sportsbook, sportsbook),
+    )
+
+
 def _sync_prizepicks_from_stage(conn) -> None:
     cursor = conn.cursor()
     cursor.execute(
@@ -229,8 +282,7 @@ def _sync_prizepicks_from_stage(conn) -> None:
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'),
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
             )
-        WHEN NOT MATCHED BY SOURCE AND t.sportsbook = N'prizepicks' THEN
-            DELETE;
+        -- Missing rows are archived/deleted by _archive_missing_from_stage.
         """
     )
 
@@ -321,8 +373,7 @@ def _sync_underdog_from_stage(conn) -> None:
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'),
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
             )
-        WHEN NOT MATCHED BY SOURCE AND t.sportsbook = N'underdog' THEN
-            DELETE;
+        -- Missing rows are archived/deleted by _archive_missing_from_stage.
         """
     )
 
@@ -426,8 +477,7 @@ def _sync_parlay_play_from_stage(conn) -> None:
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'),
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
             )
-        WHEN NOT MATCHED BY SOURCE AND t.sportsbook = N'parlay_play' THEN
-            DELETE;
+        -- Missing rows are archived/deleted by _archive_missing_from_stage.
         """
     )
 
@@ -492,10 +542,13 @@ def sync_sportsbook_projection_snapshot(
         with conn:
             if sb == "prizepicks":
                 _sync_prizepicks_from_stage(conn)
+                _archive_missing_from_stage(conn, "prizepicks", "prizepicks_projection_stage")
             elif sb == "underdog":
                 _sync_underdog_from_stage(conn)
+                _archive_missing_from_stage(conn, "underdog", "underdog_projection_stage")
             else:
                 _sync_parlay_play_from_stage(conn)
+                _archive_missing_from_stage(conn, "parlay_play", "parlay_play_projection_stage")
             _archive_started_projections(conn)
 
         cursor = conn.cursor()
