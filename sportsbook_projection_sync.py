@@ -20,6 +20,17 @@ def _table_exists(conn, schema: str, name: str) -> bool:
         cursor.close()
 
 
+def _sql_parlay_match_league_id_as_prizepicks() -> str:
+    """Expression mapping Parlay `match.league_id` to PrizePicks `league_id` (see cross_book_stat_normalize)."""
+    from cross_book_stat_normalize import PARLAY_MATCH_LEAGUE_ID_TO_PRIZEPICKS
+
+    pairs = sorted(PARLAY_MATCH_LEAGUE_ID_TO_PRIZEPICKS.items())
+    if not pairs:
+        return "m.league_id"
+    whens = " ".join(f"WHEN m.league_id = {pl} THEN {pp}" for pl, pp in pairs)
+    return f"CASE {whens} ELSE m.league_id END"
+
+
 def _resolve_pk_column(conn, table_name: str) -> str:
     """
     Resolve the primary key column name for a Parlay Play reference table.
@@ -634,6 +645,7 @@ def _sync_parlay_play_from_stage(conn) -> None:
     player_pk = _resolve_pk_column(conn, "parlay_play_player")
     match_pk = _resolve_pk_column(conn, "parlay_play_match")
     team_pk = _resolve_pk_column(conn, "parlay_play_team")
+    pp_league_expr = _sql_parlay_match_league_id_as_prizepicks()
 
     cursor = conn.cursor()
     cursor.execute(
@@ -664,7 +676,7 @@ def _sync_parlay_play_from_stage(conn) -> None:
                 s.line_score,
                 CASE WHEN s.is_main_line = 1 THEN N'main' ELSE N'alt' END AS odds_type,
                 CAST(s.start_time AS datetime2(3)) AS start_time,
-                m.league_id,
+                CAST({pp_league_expr} AS int) AS league_id,
                 COALESCE(NULLIF(LTRIM(RTRIM(pt.team_abbreviation)), N''), NULLIF(LTRIM(RTRIM(pt.teamname_abbr)), N'')) AS team,
                 NULLIF(LTRIM(RTRIM(pt.teamname)), N'') AS team_name,
                 COALESCE(NULLIF(LTRIM(RTRIM(ht.team_abbreviation)), N''), NULLIF(LTRIM(RTRIM(ht.teamname_abbr)), N'')) AS home_abbreviation,

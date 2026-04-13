@@ -3,8 +3,9 @@ Cross-provider stat normalization for PrizePicks, Underdog, and Parlay Play.
 
 - normalize_stat_basic: map API codes / short tokens to PrizePicks-style labels (for scraper ingest).
 - normalize_for_join: same labels plus internal join buckets (e.g. Blocks + Blocked Shots) for matching.
-- parlay_match_league_id_for_prizepicks: Parlay Play `parlay_play_match.league_id` uses a different id space
-  than PrizePicks `league_id` (e.g. NBA is2 vs 7). Returns None when no reliable 1:1 mapping exists.
+- parlay_match_league_id_for_prizepicks: PrizePicks `league_id` -> Parlay `match.league_id` for joins.
+- parlay_match_league_id_to_prizepicks: inverse (Parlay match id -> PrizePicks id) for unified storage.
+  Parlay and PP use different numbers (e.g. Parlay NBA=2 vs PP NBA=7; Parlay MLB=7 vs PP MLB=2).
 """
 
 from __future__ import annotations
@@ -166,6 +167,7 @@ CANONICAL_STAT_BY_ALNUM: dict[str, str] = {
     "babpitchingstrikeouts": "Pitcher Strikeouts",
     "babstrikeouts": "Hitter Strikeouts",
     "babpitchingouts": "Pitching Outs",
+    "babpitchesthrown": "Pitches Thrown",
     "babhitsallowed": "Hits Allowed",
     "babwalksallowed": "Walks Allowed",
     "babparlaypoints": "Hitter Fantasy Score",
@@ -284,6 +286,30 @@ def _apply_env_parlay_league_overrides(m: dict[int, int | None]) -> None:
 
 
 _apply_env_parlay_league_overrides(PRIZEPICKS_TO_PARLAY_MATCH_LEAGUE_ID)
+
+
+def _invert_parlay_match_to_prizepicks_leagues() -> dict[int, int]:
+    """Parlay `parlay_play_match.league_id` -> PrizePicks `league_id` (same space as PP/UD in sportsbook_projection)."""
+    inv: dict[int, int] = {}
+    for pp_id, parlay_id in PRIZEPICKS_TO_PARLAY_MATCH_LEAGUE_ID.items():
+        if parlay_id is not None:
+            inv[parlay_id] = pp_id
+    return inv
+
+
+# Built after env overrides so NFL/CFB Parlay ids map back correctly.
+PARLAY_MATCH_LEAGUE_ID_TO_PRIZEPICKS: dict[int, int] = _invert_parlay_match_to_prizepicks_leagues()
+
+
+def parlay_match_league_id_to_prizepicks(parlay_match_league_id: int | None) -> int | None:
+    """Map Parlay Play match.league_id into PrizePicks league_id (None if unknown / unmapped)."""
+    if parlay_match_league_id is None:
+        return None
+    try:
+        k = int(parlay_match_league_id)
+    except (TypeError, ValueError):
+        return None
+    return PARLAY_MATCH_LEAGUE_ID_TO_PRIZEPICKS.get(k)
 
 
 def parlay_match_league_id_for_prizepicks(pp_league_id: int | None) -> int | None:

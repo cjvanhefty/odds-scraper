@@ -41,7 +41,11 @@ from projection_over_streak import (
 
 from app.db import get_conn
 
-from cross_book_stat_normalize import normalize_for_join, parlay_match_league_id_for_prizepicks
+from cross_book_stat_normalize import (
+    normalize_for_join,
+    normalize_stat_basic,
+    parlay_match_league_id_for_prizepicks,
+)
 
 
 def _lookup_parlay_line(
@@ -196,8 +200,8 @@ def _fetch_unified_projection_rows(
 
 def _group_player_projections(rows: list[dict], stat_type_filter: str | None) -> list[dict]:
     wanted_stat = normalize_for_join((stat_type_filter or "").strip()) if stat_type_filter and stat_type_filter.strip() else None
-    grouped: dict[str, dict] = {}
-    player_order: list[str] = []
+    grouped: dict[tuple, dict] = {}
+    player_order: list[tuple] = []
     for row in rows:
         player_name = (row.get("player_name") or "").strip()
         if not player_name:
@@ -208,7 +212,9 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
             continue
         if wanted_stat and stat_key != wanted_stat:
             continue
-        pkey = player_name.lower()
+        # Group by name *and* league so the same display name in NBA vs MLB (or any two sports)
+        # does not share one bucket; otherwise the parent's league_id can tag the wrong sport's stats.
+        pkey = (player_name.lower(), row.get("league_id"))
         player_item = grouped.get(pkey)
         if player_item is None:
             player_item = {
@@ -248,14 +254,14 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
         stat_item = player_item["__stats"].get(stat_key)
         if stat_item is None:
             stat_item = {
-                "stat_type_name": stat_type_name,
+                "stat_type_name": normalize_stat_basic(stat_type_name) or stat_type_name,
                 "stat_type_key": stat_key,
                 "sportsbook_projections": {k: None for k in SPORTSBOOK_KEYS},
                 "__book_scores": {},
             }
             player_item["__stats"][stat_key] = stat_item
         elif sportsbook == "prizepicks":
-            stat_item["stat_type_name"] = stat_type_name
+            stat_item["stat_type_name"] = normalize_stat_basic(stat_type_name) or stat_type_name
         if sportsbook not in SPORTSBOOK_KEYS:
             continue
         payload = {
