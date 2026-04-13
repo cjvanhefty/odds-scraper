@@ -76,6 +76,40 @@ def ensure_sportsbook_projection_table(conn) -> None:
         END;
 
         IF NOT EXISTS (
+            SELECT 1 FROM sys.tables WHERE name = 'sportsbook_projection_history' AND schema_id = SCHEMA_ID('dbo')
+        )
+        BEGIN
+            CREATE TABLE [dbo].[sportsbook_projection_history](
+                [sportsbook] [nvarchar](30) NOT NULL,
+                [external_projection_id] [bigint] NOT NULL,
+                [source_player_id] [nvarchar](64) NULL,
+                [source_game_id] [nvarchar](64) NULL,
+                [player_name] [nvarchar](255) NOT NULL,
+                [stat_type_name] [nvarchar](120) NOT NULL,
+                [line_score] [decimal](10, 2) NULL,
+                [odds_type] [nvarchar](50) NULL,
+                [start_time] [datetime2](3) NULL,
+                [league_id] [int] NULL,
+                [team] [nvarchar](50) NULL,
+                [team_name] [nvarchar](100) NULL,
+                [home_abbreviation] [nvarchar](10) NULL,
+                [away_abbreviation] [nvarchar](10) NULL,
+                [opponent_abbreviation] [nvarchar](10) NULL,
+                [home_away] [nvarchar](1) NULL,
+                [event_name] [nvarchar](200) NULL,
+                [extra_json] [nvarchar](max) NULL,
+                [created_at] [datetime2](7) NOT NULL,
+                [last_modified_at] [datetime2](7) NOT NULL,
+                [archived_at] [datetime2](7) NOT NULL
+                    CONSTRAINT [DF_sportsbook_projection_history_archived_at]
+                    DEFAULT (CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')),
+                [archive_reason] [nvarchar](40) NOT NULL
+                    CONSTRAINT [DF_sportsbook_projection_history_archive_reason]
+                    DEFAULT (N'unknown')
+            ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
+        END;
+
+        IF NOT EXISTS (
             SELECT 1 FROM sys.indexes
             WHERE name = 'IX_sportsbook_projection_player_time'
               AND object_id = OBJECT_ID('dbo.sportsbook_projection')
@@ -94,6 +128,16 @@ def ensure_sportsbook_projection_table(conn) -> None:
         BEGIN
             CREATE NONCLUSTERED INDEX [IX_sportsbook_projection_book_time]
                 ON [dbo].[sportsbook_projection]([sportsbook], [start_time]);
+        END;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'IX_sportsbook_projection_history_book_time'
+              AND object_id = OBJECT_ID('dbo.sportsbook_projection_history')
+        )
+        BEGIN
+            CREATE NONCLUSTERED INDEX [IX_sportsbook_projection_history_book_time]
+                ON [dbo].[sportsbook_projection_history]([sportsbook], [start_time], [archived_at]);
         END;
         """
     )
@@ -388,6 +432,46 @@ def _sync_parlay_play_from_stage(conn) -> None:
     )
 
 
+def _archive_started_projections(conn) -> None:
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        DECLARE @nowCentral datetime2(7) =
+            CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time');
+
+        INSERT INTO [dbo].[sportsbook_projection_history](
+            sportsbook, external_projection_id, source_player_id, source_game_id,
+            player_name, stat_type_name, line_score, odds_type, start_time, league_id,
+            team, team_name, home_abbreviation, away_abbreviation, opponent_abbreviation,
+            home_away, event_name, extra_json, created_at, last_modified_at,
+            archived_at, archive_reason
+        )
+        SELECT
+            p.sportsbook, p.external_projection_id, p.source_player_id, p.source_game_id,
+            p.player_name, p.stat_type_name, p.line_score, p.odds_type, p.start_time, p.league_id,
+            p.team, p.team_name, p.home_abbreviation, p.away_abbreviation, p.opponent_abbreviation,
+            p.home_away, p.event_name, p.extra_json, p.created_at, p.last_modified_at,
+            @nowCentral, N'game_started'
+        FROM [dbo].[sportsbook_projection] p
+        WHERE p.start_time IS NOT NULL
+          AND p.start_time < @nowCentral
+          AND NOT EXISTS (
+              SELECT 1
+              FROM [dbo].[sportsbook_projection_history] h
+              WHERE h.sportsbook = p.sportsbook
+                AND h.external_projection_id = p.external_projection_id
+                AND ((h.start_time = p.start_time) OR (h.start_time IS NULL AND p.start_time IS NULL))
+                AND h.archive_reason = N'game_started'
+          );
+
+        DELETE p
+        FROM [dbo].[sportsbook_projection] p
+        WHERE p.start_time IS NOT NULL
+          AND p.start_time < @nowCentral;
+        """
+    )
+
+
 def sync_sportsbook_projection_snapshot(
     sportsbook: str,
     server: str = "localhost\\SQLEXPRESS",
@@ -412,6 +496,7 @@ def sync_sportsbook_projection_snapshot(
                 _sync_underdog_from_stage(conn)
             else:
                 _sync_parlay_play_from_stage(conn)
+            _archive_started_projections(conn)
 
         cursor = conn.cursor()
         cursor.execute(
