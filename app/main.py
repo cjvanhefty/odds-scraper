@@ -304,6 +304,27 @@ def get_parlay_play_lines_by_match(
     """
     cursor = conn.cursor()
     try:
+        # Some deployments use `{table}_id` instead of `id` as the PK column.
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = 'parlay_play_match'
+              AND COLUMN_NAME IN ('id', 'parlay_play_match_id')
+            """
+        )
+        match_pk_cols = {r[0] for r in cursor.fetchall()}
+        if "id" in match_pk_cols:
+            match_pk = "id"
+        elif "parlay_play_match_id" in match_pk_cols:
+            match_pk = "parlay_play_match_id"
+        else:
+            raise RuntimeError(
+                "Cannot resolve PK column for dbo.parlay_play_match. "
+                "Expected 'id' or 'parlay_play_match_id'."
+            )
+
         if date_from is None or date_to is None:
             end = datetime.now(timezone.utc).date()
             start = end - timedelta(days=45)
@@ -313,12 +334,12 @@ def get_parlay_play_lines_by_match(
         # Rows are merged into dicts with last-write-wins. ORDER BY main-last (non-main rows first) so the
         # final line_score per key is is_main_line=1, matching PrizePicks/Underdog standard odds.
         cursor.execute(
-            """
+            f"""
             SELECT m.league_id, p.display_name, p.stat_type_name,
                    CONVERT(varchar(10), CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0)), 120) AS game_date,
                    p.line_score
             FROM [dbo].[parlay_play_projection] p
-            INNER JOIN [dbo].[parlay_play_match] m ON m.id = p.match_id
+            INNER JOIN [dbo].[parlay_play_match] m ON m.[{match_pk}] = p.match_id
             WHERE p.display_name IS NOT NULL AND p.stat_type_name IS NOT NULL
               AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) >= ?
               AND CONVERT(date, CAST(p.start_time AT TIME ZONE 'Central Standard Time' AS datetime2(0))) <= ?
@@ -791,56 +812,68 @@ def get_projections_last_updated():
 
 @app.post("/api/update/projections")
 def update_projections():
-    """Run prizepicks_scraper.py --all-leagues --db to fetch all sports. Uses same DB auth as NBA stats."""
-    env = os.environ.copy()
-    server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
-    user = env.get("PROPS_DB_USER", "dbadmin")
-    password = env.get("PROPS_DB_PASSWORD", "")
-    trusted = env.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
-    use_browser = env.get("PROPS_PRIZEPICKS_USE_BROWSER", "").strip().lower() in ("1", "true", "yes")
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "prizepicks_scraper.py"),
+    """Run prizepicks_scraper in-process (avoids debugger subprocess issues)."""
+    server = os.environ.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
+    user = os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = os.environ.get("PROPS_DB_PASSWORD", "")
+    trusted = os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
+    use_browser = os.environ.get("PROPS_PRIZEPICKS_USE_BROWSER", "").strip().lower() in ("1", "true", "yes")
+    database = os.environ.get("PROPS_DATABASE", "Props")
+
+    argv = [
+        "prizepicks_scraper.py",
         "--all-leagues",
         "--db",
         "--db-server", server,
+        "--database", database,
         "--db-user", user,
         "--db-password", password,
     ]
     if trusted:
-        cmd.append("--trusted-connection")
+        argv.append("--trusted-connection")
     if use_browser:
-        cmd.append("--browser")
+        argv.append("--browser")
+
+    from io import StringIO
+    old_argv = sys.argv
+    old_stdout = sys.stdout
+    sys.argv = argv
+    sys.stdout = StringIO()
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=300 if use_browser else 180,
-            env=env,
-        )
-        if result.returncode != 0:
-            err = result.stderr or result.stdout or ""
-            if "Login failed for user" in err or "18456" in err:
-                detail = (
-                    "Database login failed. Use the same credentials as NBA stats: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
-                    "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Restart the app after setting env. "
-                    "Original error: " + err[:400]
-                )
-            elif "403" in err or "Forbidden" in err:
-                detail = (
-                    "PrizePicks may be blocking the request. Set PROPS_PRIZEPICKS_USE_BROWSER=1 and restart the app. "
-                    "Original error: " + err[:400]
-                )
-            else:
-                detail = f"Scraper exited {result.returncode}: {err[:500]}"
-            raise HTTPException(status_code=502, detail=detail)
-        return {"ok": True, "message": "Projections updated", "log": result.stdout}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Update timed out")
+        import prizepicks_scraper
+        exit_code = prizepicks_scraper.main()
+        out = sys.stdout.getvalue()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        out = sys.stdout.getvalue()
+        tail = (out or "").strip()
+        if len(tail) > 2500:
+            tail = tail[-2500:]
+        detail = (str(e) or "Scraper failed").strip()
+        if tail:
+            detail += "\n\n--- scraper log (tail) ---\n" + tail
+        raise HTTPException(status_code=500, detail=detail[:3500])
+    finally:
+        sys.argv = old_argv
+        sys.stdout = old_stdout
+
+    if exit_code != 0:
+        tail = (out or "").strip()
+        if len(tail) > 3500:
+            tail = tail[-3500:]
+        if "Login failed for user" in out or "18456" in out:
+            detail = (
+                "Database login failed. Use the same credentials as NBA stats: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
+                "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Original error: " + out[:400]
+            )
+        elif "403" in out or "Forbidden" in out:
+            detail = (
+                "PrizePicks may be blocking the request. Set PROPS_PRIZEPICKS_USE_BROWSER=1 and restart the app. "
+                "Original error: " + out[:400]
+            )
+        else:
+            detail = f"Scraper exited {exit_code}.\n\n--- scraper log (tail) ---\n{tail}"
+        raise HTTPException(status_code=502, detail=detail)
+    return {"ok": True, "message": "Projections updated", "log": out}
 
 
 class NbaStatsUpdateBody(BaseModel):
@@ -911,63 +944,95 @@ def update_parlayplay_projections():
 @app.post("/api/update/underdog-projections")
 def update_underdog_projections():
     """Run underdog_scraper.py --db (tries httpx first, falls back to browser on 401/403). Set PROPS_UNDERDOG_USER_DATA_DIR for saved login fallback."""
-    env = os.environ.copy()
-    server = env.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
-    user = env.get("PROPS_DB_USER", "dbadmin")
-    password = env.get("PROPS_DB_PASSWORD", "")
-    trusted = env.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
-    user_data_dir = env.get("PROPS_UNDERDOG_USER_DATA_DIR", "").strip()
-    cmd = [
-        sys.executable,
-        str(REPO_ROOT / "underdog_scraper.py"),
+    # Run in-process to avoid debugpy/pydevd subprocess interception (which returns 502).
+    # We still enforce an HTTP timeout to keep the API responsive.
+    server = os.environ.get("PROPS_DB_SERVER", "localhost\\SQLEXPRESS")
+    user = os.environ.get("PROPS_DB_USER", "dbadmin")
+    password = os.environ.get("PROPS_DB_PASSWORD", "")
+    trusted = os.environ.get("PROPS_DB_USE_TRUSTED_CONNECTION", "").strip().lower() in ("1", "true", "yes")
+    user_data_dir = os.environ.get("PROPS_UNDERDOG_USER_DATA_DIR", "").strip()
+    connect_url = os.environ.get("PROPS_BROWSER_CDP", "").strip()
+
+    argv = [
+        "underdog_scraper.py",
         "--db",
         "--db-server", server,
         "--db-user", user,
         "--db-password", password,
     ]
     if trusted:
-        cmd.append("--trusted-connection")
+        argv.append("--trusted-connection")
     if user_data_dir:
-        cmd.extend(["--user-data-dir", user_data_dir])
+        argv.extend(["--user-data-dir", user_data_dir])
+    if connect_url:
+        argv.extend(["--connect", connect_url])
+
+    timeout_s = 180 if user_data_dir else 120
+
+    from io import StringIO
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+    old_argv = sys.argv
+    old_stdout = sys.stdout
+    sys.argv = argv
+    sys.stdout = StringIO()
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=180 if user_data_dir else 120,
-            env=env,
-        )
-        if result.returncode != 0:
-            err = result.stderr or result.stdout or ""
-            if "Login failed for user" in err or "18456" in err:
-                detail = (
-                    "Database login failed. Use same credentials as NBA/PrizePicks: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
-                    "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Restart the app after setting env. "
-                    "Original error: " + err[:400]
-                )
-            else:
-                detail = f"Scraper exited {result.returncode}: {err[:500]}"
-            raise HTTPException(status_code=502, detail=detail)
-        out = result.stdout or ""
-        if "Fetched 0 projection records via API." in out:
-            return {"ok": True, "message": "Underdog projections updated (0 lines).", "log": result.stdout}
-        if "No records after browser fallback" in out:
-            return {"ok": True, "message": "Underdog: 0 records after browser fallback (session may be expired). Run from CLI with --browser --headed to log in.", "log": result.stdout}
-        if "0 projection records" in out or "No records." in out:
-            msg = "Underdog: 0 records."
-            if "401" in out or "unauthorized" in out.lower():
-                msg = "Underdog: 0 records (session expired or not logged in). Run from CLI: python underdog_scraper.py --browser --user-data-dir .playwright-underdog --headed — log in, press Enter. Then try Update Underdog again."
-            elif "403" in out or "forbidden" in out.lower():
-                msg = "Underdog: 0 records (403 forbidden). Log in again with --headed, then try Update Underdog again."
-            else:
-                msg = "Underdog: 0 records. Set PROPS_UNDERDOG_USER_DATA_DIR=.playwright-underdog and restart. First time: run from CLI with --headed to log in."
-            return {"ok": True, "message": msg, "log": result.stdout}
-        return {"ok": True, "message": "Underdog projections updated", "log": result.stdout}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Update timed out")
+        import underdog_scraper
+
+        def _run():
+            return underdog_scraper.main()
+
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_run)
+            try:
+                exit_code = fut.result(timeout=timeout_s)
+            except FutureTimeoutError:
+                raise HTTPException(status_code=504, detail="Update timed out")
+
+        out = sys.stdout.getvalue()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        out = sys.stdout.getvalue()
+        tail = (out or "").strip()
+        if len(tail) > 2500:
+            tail = tail[-2500:]
+        detail = (str(e) or "Underdog scraper failed").strip()
+        if tail:
+            detail += "\n\n--- scraper log (tail) ---\n" + tail
+        raise HTTPException(status_code=500, detail=detail[:3500])
+    finally:
+        sys.argv = old_argv
+        sys.stdout = old_stdout
+
+    if exit_code != 0:
+        tail = (out or "").strip()
+        if len(tail) > 3500:
+            tail = tail[-3500:]
+        if "Login failed for user" in out or "18456" in out:
+            detail = (
+                "Database login failed. Use same credentials as NBA/PrizePicks: set PROPS_DB_USER and PROPS_DB_PASSWORD, "
+                "or PROPS_DB_USE_TRUSTED_CONNECTION=1 for Windows auth. Restart the app after setting env. "
+                "Original error: " + out[:600]
+            )
+        else:
+            detail = f"Scraper exited {exit_code}.\n\n--- scraper log (tail) ---\n{tail}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    if "Fetched 0 projection records via API." in out:
+        return {"ok": True, "message": "Underdog projections updated (0 lines).", "log": out}
+    if "No records after browser fallback" in out:
+        return {"ok": True, "message": "Underdog: 0 records after browser fallback (session may be expired). Run from CLI with --browser --headed to log in.", "log": out}
+    if "0 projection records" in out or "No records." in out:
+        msg = "Underdog: 0 records."
+        if "401" in out or "unauthorized" in out.lower():
+            msg = "Underdog: 0 records (session expired or not logged in). Run from CLI: python underdog_scraper.py --browser --user-data-dir .playwright-underdog --headed — log in, press Enter. Then try Update Underdog again."
+        elif "403" in out or "forbidden" in out.lower():
+            msg = "Underdog: 0 records (403 forbidden). Log in again with --headed, then try Update Underdog again."
+        else:
+            msg = "Underdog: 0 records. Set PROPS_UNDERDOG_USER_DATA_DIR=.playwright-underdog and restart. First time: run from CLI with --headed to log in."
+        return {"ok": True, "message": msg, "log": out}
+    return {"ok": True, "message": "Underdog projections updated", "log": out}
 
 
 @app.post("/api/update/nba-stats")

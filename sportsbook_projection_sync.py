@@ -3,6 +3,54 @@
 from __future__ import annotations
 
 
+def _table_exists(conn, schema: str, name: str) -> bool:
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM sys.tables t
+            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE s.name = ? AND t.name = ?
+            """,
+            (schema, name),
+        )
+        return cursor.fetchone() is not None
+    finally:
+        cursor.close()
+
+
+def _resolve_pk_column(conn, table_name: str) -> str:
+    """
+    Resolve the primary key column name for a Parlay Play reference table.
+
+    Most tables use `id`, but some older deployments use `{table_name}_id`.
+    """
+    cursor = conn.cursor()
+    try:
+        fallback = f"{table_name}_id"
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = ?
+              AND COLUMN_NAME IN ('id', ?)
+            """,
+            (table_name, fallback),
+        )
+        cols = {r[0] for r in cursor.fetchall()}
+        if "id" in cols:
+            return "id"
+        if fallback in cols:
+            return fallback
+        raise RuntimeError(
+            f"Cannot resolve PK column for dbo.{table_name}. Expected 'id' or '{fallback}'."
+        )
+    finally:
+        cursor.close()
+
+
 def _get_db_conn(
     server: str,
     database: str,
@@ -367,10 +415,11 @@ def _archive_line_changes_parlay_play(conn) -> None:
 
 
 def _sync_prizepicks_from_stage(conn) -> None:
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        ;WITH src AS (
+    has_player = _table_exists(conn, "dbo", "prizepicks_player")
+    has_game = _table_exists(conn, "dbo", "prizepicks_game")
+
+    if has_player and has_game:
+        src_select = """
             SELECT
                 CAST(s.projection_id AS bigint) AS external_projection_id,
                 CAST(s.player_id AS nvarchar(64)) AS source_player_id,
@@ -412,6 +461,37 @@ def _sync_prizepicks_from_stage(conn) -> None:
                 ON g.game_id = CAST(s.game_id AS nvarchar(20))
             WHERE s.player_id IS NOT NULL
               AND LTRIM(RTRIM(COALESCE(s.stat_type_name, N''))) <> N''
+        """
+    else:
+        # Allow unified sync even if prizepicks_player/prizepicks_game tables haven't been created yet.
+        # The stage table is required; richer metadata will be filled once reference tables exist.
+        src_select = """
+            SELECT
+                CAST(s.projection_id AS bigint) AS external_projection_id,
+                CAST(s.player_id AS nvarchar(64)) AS source_player_id,
+                CAST(s.game_id AS nvarchar(64)) AS source_game_id,
+                N'Player ' + CAST(s.player_id AS nvarchar(64)) AS player_name,
+                LTRIM(RTRIM(COALESCE(s.stat_type_name, N''))) AS stat_type_name,
+                s.line_score,
+                LTRIM(RTRIM(COALESCE(s.odds_type, N''))) AS odds_type,
+                CAST(s.start_time AS datetime2(3)) AS start_time,
+                s.league_id,
+                NULL AS team,
+                NULL AS team_name,
+                NULL AS home_abbreviation,
+                NULL AS away_abbreviation,
+                NULL AS opponent_abbreviation,
+                NULL AS home_away,
+                NULL AS event_name,
+                NULL AS extra_json
+            FROM [dbo].[prizepicks_projection_stage] s
+            WHERE s.player_id IS NOT NULL
+              AND LTRIM(RTRIM(COALESCE(s.stat_type_name, N''))) <> N''
+        """
+
+    sql = f"""
+        ;WITH src AS (
+            {src_select}
         )
         MERGE [dbo].[sportsbook_projection] AS t
         USING src AS s
@@ -450,10 +530,13 @@ def _sync_prizepicks_from_stage(conn) -> None:
                 s.home_away, s.event_name, s.extra_json,
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'),
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
-            )
-        -- Missing rows are archived/deleted by _archive_missing_from_stage.
+            );
         """
-    )
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql)
+    finally:
+        cursor.close()
 
 
 def _sync_underdog_from_stage(conn) -> None:
@@ -541,16 +624,20 @@ def _sync_underdog_from_stage(conn) -> None:
                 s.home_away, s.event_name, s.extra_json,
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'),
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
-            )
+            );
         -- Missing rows are archived/deleted by _archive_missing_from_stage.
         """
     )
 
 
 def _sync_parlay_play_from_stage(conn) -> None:
+    player_pk = _resolve_pk_column(conn, "parlay_play_player")
+    match_pk = _resolve_pk_column(conn, "parlay_play_match")
+    team_pk = _resolve_pk_column(conn, "parlay_play_team")
+
     cursor = conn.cursor()
     cursor.execute(
-        """
+        f"""
         ;WITH ranked_stage AS (
             SELECT
                 s.*,
@@ -596,15 +683,15 @@ def _sync_parlay_play_from_stage(conn) -> None:
                 NULL AS extra_json
             FROM ranked_stage s
             LEFT JOIN [dbo].[parlay_play_player] pp
-                ON pp.id = s.player_id
+                ON pp.[{player_pk}] = s.player_id
             LEFT JOIN [dbo].[parlay_play_match] m
-                ON m.id = s.match_id
+                ON m.[{match_pk}] = s.match_id
             LEFT JOIN [dbo].[parlay_play_team] pt
-                ON pt.id = pp.team_id
+                ON pt.[{team_pk}] = pp.team_id
             LEFT JOIN [dbo].[parlay_play_team] ht
-                ON ht.id = m.home_team_id
+                ON ht.[{team_pk}] = m.home_team_id
             LEFT JOIN [dbo].[parlay_play_team] at
-                ON at.id = m.away_team_id
+                ON at.[{team_pk}] = m.away_team_id
             WHERE s.rn = 1
               AND LTRIM(RTRIM(COALESCE(s.stat_type_name, N''))) <> N''
         )
@@ -645,7 +732,7 @@ def _sync_parlay_play_from_stage(conn) -> None:
                 s.home_away, s.event_name, s.extra_json,
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time'),
                 CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time')
-            )
+            );
         -- Missing rows are archived/deleted by _archive_missing_from_stage.
         """
     )
