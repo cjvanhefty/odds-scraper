@@ -105,6 +105,190 @@ def _parlay_slate_date_bounds(projections: list) -> tuple[str, str] | None:
     return (lo.isoformat(), hi.isoformat())
 
 
+SPORTSBOOK_KEYS = ("prizepicks", "underdog", "parlay_play")
+
+
+def _serialize_datetime(val):
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.replace(tzinfo=None).isoformat()
+    if hasattr(val, "isoformat"):
+        try:
+            return val.isoformat()
+        except Exception:
+            return str(val)
+    return str(val)
+
+
+def _projection_choice_score(sportsbook: str, odds_type: str | None, start_time_val) -> tuple[int, str]:
+    sb = (sportsbook or "").strip().lower()
+    odds = (odds_type or "").strip().lower()
+    if sb == "prizepicks":
+        odds_rank = 0 if odds == "standard" else 1
+    elif sb == "parlay_play":
+        odds_rank = 0 if odds in ("main", "") else 1
+    else:
+        odds_rank = 0
+    return (odds_rank, _serialize_datetime(start_time_val) or "")
+
+
+def _fetch_unified_projection_rows(
+    conn,
+    league_id_list: list[int] | None,
+    include_all_odds: bool,
+    player_name: str | None,
+    active_only: bool,
+) -> list[dict]:
+    now_central = "CAST(GETUTCDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'Central Standard Time' AS datetime2(0))"
+    where_parts = [
+        "sp.player_name IS NOT NULL",
+        "LTRIM(RTRIM(sp.player_name)) <> N''",
+        f"sp.start_time >= DATEADD(day, -30, CAST({now_central} AS DATE))",
+    ]
+    params: list = []
+    if active_only:
+        where_parts.append(f"sp.start_time >= {now_central}")
+    if not include_all_odds:
+        where_parts.append(
+            "("
+            "(sp.sportsbook <> N'prizepicks' OR LOWER(LTRIM(RTRIM(COALESCE(sp.odds_type, N'')))) = N'standard') "
+            "AND "
+            "(sp.sportsbook <> N'parlay_play' OR LOWER(LTRIM(RTRIM(COALESCE(sp.odds_type, N'main')))) = N'main')"
+            ")"
+        )
+    if league_id_list:
+        placeholders = ",".join("?" * len(league_id_list))
+        where_parts.append(f"sp.league_id IN ({placeholders})")
+        params.extend(league_id_list)
+    if player_name and player_name.strip():
+        where_parts.append("LOWER(LTRIM(RTRIM(sp.player_name))) = LOWER(?)")
+        params.append(player_name.strip())
+    where_sql = " AND ".join(where_parts)
+    sql = f"""
+        SELECT
+            sp.sportsbook,
+            sp.external_projection_id,
+            sp.source_player_id,
+            sp.source_game_id,
+            sp.player_name,
+            sp.stat_type_name,
+            sp.line_score,
+            sp.odds_type,
+            sp.start_time,
+            sp.league_id,
+            sp.team,
+            sp.team_name,
+            sp.home_abbreviation,
+            sp.away_abbreviation,
+            sp.opponent_abbreviation,
+            sp.home_away,
+            sp.event_name
+        FROM [dbo].[sportsbook_projection] sp
+        WHERE {where_sql}
+        ORDER BY sp.start_time, sp.player_name, sp.stat_type_name, sp.sportsbook, sp.external_projection_id
+    """
+    cursor = conn.cursor()
+    cursor.execute(sql, params)
+    columns = [c[0] for c in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def _group_player_projections(rows: list[dict], stat_type_filter: str | None) -> list[dict]:
+    wanted_stat = normalize_for_join((stat_type_filter or "").strip()) if stat_type_filter and stat_type_filter.strip() else None
+    grouped: dict[str, dict] = {}
+    player_order: list[str] = []
+    for row in rows:
+        player_name = (row.get("player_name") or "").strip()
+        if not player_name:
+            continue
+        stat_type_name = (row.get("stat_type_name") or "").strip()
+        stat_key = normalize_for_join(stat_type_name)
+        if not stat_key:
+            continue
+        if wanted_stat and stat_key != wanted_stat:
+            continue
+        pkey = player_name.lower()
+        player_item = grouped.get(pkey)
+        if player_item is None:
+            player_item = {
+                "display_name": player_name,
+                "player": player_name,
+                "team": row.get("team"),
+                "team_name": row.get("team_name"),
+                "league_id": row.get("league_id"),
+                "game": {
+                    "start_time": _serialize_datetime(row.get("start_time")),
+                    "event_name": row.get("event_name"),
+                    "home_abbreviation": row.get("home_abbreviation"),
+                    "away_abbreviation": row.get("away_abbreviation"),
+                    "opponent_abbreviation": row.get("opponent_abbreviation"),
+                    "home_away": row.get("home_away"),
+                },
+                "__stats": {},
+                "__source_rank": 999,
+            }
+            grouped[pkey] = player_item
+            player_order.append(pkey)
+        sportsbook = (row.get("sportsbook") or "").strip().lower()
+        rank = 0 if sportsbook == "prizepicks" else (1 if sportsbook == "underdog" else (2 if sportsbook == "parlay_play" else 3))
+        if rank < player_item["__source_rank"]:
+            player_item["team"] = row.get("team")
+            player_item["team_name"] = row.get("team_name")
+            player_item["league_id"] = row.get("league_id")
+            player_item["game"] = {
+                "start_time": _serialize_datetime(row.get("start_time")),
+                "event_name": row.get("event_name"),
+                "home_abbreviation": row.get("home_abbreviation"),
+                "away_abbreviation": row.get("away_abbreviation"),
+                "opponent_abbreviation": row.get("opponent_abbreviation"),
+                "home_away": row.get("home_away"),
+            }
+            player_item["__source_rank"] = rank
+        stat_item = player_item["__stats"].get(stat_key)
+        if stat_item is None:
+            stat_item = {
+                "stat_type_name": stat_type_name,
+                "stat_type_key": stat_key,
+                "sportsbook_projections": {k: None for k in SPORTSBOOK_KEYS},
+                "__book_scores": {},
+            }
+            player_item["__stats"][stat_key] = stat_item
+        elif sportsbook == "prizepicks":
+            stat_item["stat_type_name"] = stat_type_name
+        if sportsbook not in SPORTSBOOK_KEYS:
+            continue
+        payload = {
+            "projection_id": _json_safe(row.get("external_projection_id")),
+            "line_score": _json_safe(row.get("line_score")),
+            "odds_type": row.get("odds_type"),
+            "source_player_id": row.get("source_player_id"),
+            "source_game_id": row.get("source_game_id"),
+            "start_time": _serialize_datetime(row.get("start_time")),
+            "league_id": row.get("league_id"),
+            "event_name": row.get("event_name"),
+        }
+        score = _projection_choice_score(sportsbook, row.get("odds_type"), row.get("start_time"))
+        existing = stat_item["__book_scores"].get(sportsbook)
+        if existing is None or score < existing:
+            stat_item["sportsbook_projections"][sportsbook] = payload
+            stat_item["__book_scores"][sportsbook] = score
+    out: list[dict] = []
+    for pkey in player_order:
+        player_item = grouped[pkey]
+        stats: list[dict] = []
+        for stat in player_item["__stats"].values():
+            stat.pop("__book_scores", None)
+            stats.append(stat)
+        stats.sort(key=lambda s: ((s.get("stat_type_name") or ""), (s.get("stat_type_key") or "")))
+        player_item.pop("__stats", None)
+        player_item.pop("__source_rank", None)
+        player_item["projections"] = stats
+        out.append(player_item)
+    out.sort(key=lambda r: ((r.get("game", {}).get("start_time") or ""), (r.get("display_name") or "")))
+    return out
+
+
 def get_parlay_play_lines_by_match(
     conn,
     date_from: str | None = None,
@@ -282,6 +466,7 @@ def list_projections(
     page: int = Query(1, ge=1, description="Page number (used when page_size > 0)"),
     page_size: int = Query(0, ge=0, le=500, description="Rows per page; 0 = return all (no paging)"),
     full_list: bool = Query(False, description="If True and not filtering by player, return all projections (no dedupe) for client-side filtering"),
+    use_unified_projection_store: bool = Query(False, description="Read from sportsbook_projection unified table."),
 ):
     """Return PrizePicks projections with favored/risk from last N games. When page_size > 0, returns { items, total, page, page_size }.
     When league_ids is omitted or empty, returns all leagues (for grid client-side sport filter). When set, filters by those leagues."""
@@ -292,6 +477,23 @@ def list_projections(
             league_id_list = _parse_league_ids(league_id, league_ids)
         conn = get_conn()
         active_only = not (player_name and player_name.strip())
+        if use_unified_projection_store:
+            unified_rows = _fetch_unified_projection_rows(
+                conn=conn,
+                league_id_list=league_id_list,
+                include_all_odds=include_all_odds,
+                player_name=player_name,
+                active_only=active_only,
+            )
+            grouped = _group_player_projections(unified_rows, stat_type)
+            if page_size > 0:
+                total = len(grouped)
+                start = (page - 1) * page_size
+                end = start + page_size
+                items = grouped[start:end]
+                body = {"items": items, "total": total, "page": page, "page_size": page_size}
+                return JSONResponse(content=body)
+            return JSONResponse(content=grouped)
         projections = get_projections(
             conn,
             league_id=league_id_list,

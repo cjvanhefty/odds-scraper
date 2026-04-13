@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from sportsbook_projection_sync import sync_sportsbook_projection_snapshot
 
 # Common league IDs (from Prize Picks)
 LEAGUES = {
@@ -1563,6 +1564,15 @@ def main():
                 trusted_connection=trusted,
             )
             print("MergePrizepicksIncludedReferenceFromStage completed")
+            unified_count = sync_sportsbook_projection_snapshot(
+                "prizepicks",
+                server=args.db_server,
+                database="Props",
+                user=args.db_user,
+                password=args.db_password,
+                trusted_connection=trusted,
+            )
+            print(f"Synchronized {unified_count} rows into sportsbook_projection for prizepicks")
         except Exception as e:
             print(f"DB failed: {e}")
             import traceback
