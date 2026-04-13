@@ -287,6 +287,35 @@ def _apply_env_parlay_league_overrides(m: dict[int, int | None]) -> None:
 
 _apply_env_parlay_league_overrides(PRIZEPICKS_TO_PARLAY_MATCH_LEAGUE_ID)
 
+# Labels for PrizePicks `league_id` (same numeric space as `sportsbook_projection.league_id`
+# after Parlay→PP mapping). Used when the DB has no `prizepicks_player.league` text (e.g. unified store).
+PRIZEPICKS_LEAGUE_DISPLAY_NAME: dict[int, str] = {
+    1: "PGA",
+    2: "MLB",
+    # PrizePicks uses extra league rows for MLB partial-game / innings markets (not full 9-inning slate).
+    231: "MLB (partial / innings)",
+    3: "WNBA",
+    5: "Tennis",
+    7: "NBA",
+    8: "NHL",
+    9: "NFL",
+    12: "UFC",
+    14: "EPL",
+    15: "CFB",
+    20: "CBB",
+    82: "Soccer",
+}
+
+
+def prizepicks_league_display_name(league_id: int | None) -> str | None:
+    if league_id is None:
+        return None
+    try:
+        k = int(league_id)
+    except (TypeError, ValueError):
+        return None
+    return PRIZEPICKS_LEAGUE_DISPLAY_NAME.get(k)
+
 
 def _invert_parlay_match_to_prizepicks_leagues() -> dict[int, int]:
     """Parlay `parlay_play_match.league_id` -> PrizePicks `league_id` (same space as PP/UD in sportsbook_projection)."""

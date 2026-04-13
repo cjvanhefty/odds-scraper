@@ -45,6 +45,7 @@ from cross_book_stat_normalize import (
     normalize_for_join,
     normalize_stat_basic,
     parlay_match_league_id_for_prizepicks,
+    prizepicks_league_display_name,
 )
 
 
@@ -137,6 +138,82 @@ def _projection_choice_score(sportsbook: str, odds_type: str | None, start_time_
     return (odds_rank, _serialize_datetime(start_time_val) or "")
 
 
+def _resolve_parlay_play_match_pk(conn) -> str:
+    """Return `id` or `parlay_play_match_id` depending on how dbo.parlay_play_match was created."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = 'parlay_play_match'
+              AND COLUMN_NAME IN ('id', 'parlay_play_match_id')
+            """
+        )
+        match_pk_cols = {r[0] for r in cursor.fetchall()}
+        if "id" in match_pk_cols:
+            return "id"
+        if "parlay_play_match_id" in match_pk_cols:
+            return "parlay_play_match_id"
+    finally:
+        cursor.close()
+    raise RuntimeError(
+        "Cannot resolve PK column for dbo.parlay_play_match. "
+        "Expected 'id' or 'parlay_play_match_id'."
+    )
+
+
+def _resolve_parlay_play_league_pk(conn) -> str:
+    """Return `id` or `parlay_play_league_id` depending on how dbo.parlay_play_league was created."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND TABLE_NAME = 'parlay_play_league'
+              AND COLUMN_NAME IN ('id', 'parlay_play_league_id')
+            """
+        )
+        cols = {r[0] for r in cursor.fetchall()}
+        if "id" in cols:
+            return "id"
+        if "parlay_play_league_id" in cols:
+            return "parlay_play_league_id"
+    finally:
+        cursor.close()
+    raise RuntimeError(
+        "Cannot resolve PK column for dbo.parlay_play_league. "
+        "Expected 'id' or 'parlay_play_league_id'."
+    )
+
+
+def _parlay_play_match_pk_safe(conn) -> str:
+    """Resolve Parlay match PK column; fall back to ``id`` if INFORMATION_SCHEMA lookup fails (same as unified query)."""
+    try:
+        return _resolve_parlay_play_match_pk(conn)
+    except RuntimeError:
+        return "id"
+
+
+def _parlay_play_league_pk_safe(conn) -> str:
+    """Resolve Parlay league PK column; fall back to ``id`` if INFORMATION_SCHEMA lookup fails (same as unified query)."""
+    try:
+        return _resolve_parlay_play_league_pk(conn)
+    except RuntimeError:
+        return "id"
+
+
+def _league_label_unified(row: dict) -> str | None:
+    """Prefer league text from SQL (e.g. Parlay Play league name); else PrizePicks id label."""
+    text = (row.get("league") or "").strip()
+    if text:
+        return text
+    return prizepicks_league_display_name(row.get("league_id"))
+
+
 def _fetch_unified_projection_rows(
     conn,
     league_id_list: list[int] | None,
@@ -169,6 +246,8 @@ def _fetch_unified_projection_rows(
         where_parts.append("LOWER(LTRIM(RTRIM(sp.player_name))) = LOWER(?)")
         params.append(player_name.strip())
     where_sql = " AND ".join(where_parts)
+    match_pk = _parlay_play_match_pk_safe(conn)
+    league_pk = _parlay_play_league_pk_safe(conn)
     sql = f"""
         SELECT
             sp.sportsbook,
@@ -181,6 +260,45 @@ def _fetch_unified_projection_rows(
             sp.odds_type,
             sp.start_time,
             sp.league_id,
+            CASE
+                WHEN sp.sportsbook = N'parlay_play' THEN
+                    COALESCE(
+                        NULLIF(LTRIM(RTRIM(l_match.league_name_short)), N''),
+                        NULLIF(LTRIM(RTRIM(l_match.league_name)), N''),
+                        NULLIF(LTRIM(RTRIM(l_sid.league_name_short)), N''),
+                        NULLIF(LTRIM(RTRIM(l_sid.league_name)), N'')
+                    )
+                WHEN sp.sportsbook = N'prizepicks' THEN
+                    NULLIF(LTRIM(RTRIM(
+                        CASE
+                            WHEN COALESCE(
+                                    NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                    NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                ) IS NOT NULL
+                                 AND NULLIF(LTRIM(RTRIM(ppdur.name)), N'') IS NOT NULL
+                                THEN CONCAT(
+                                    COALESCE(
+                                        NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                        NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                    ),
+                                    N' · ',
+                                    LTRIM(RTRIM(ppdur.name))
+                                )
+                            WHEN COALESCE(
+                                    NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                    NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                ) IS NOT NULL
+                                THEN COALESCE(
+                                    NULLIF(LTRIM(RTRIM(pl.name)), N''),
+                                    NULLIF(LTRIM(RTRIM(pl.parent_name)), N'')
+                                )
+                            WHEN NULLIF(LTRIM(RTRIM(ppdur.name)), N'') IS NOT NULL
+                                THEN LTRIM(RTRIM(ppdur.name))
+                            ELSE NULL
+                        END
+                    )), N'')
+                ELSE NULL
+            END AS league,
             sp.team,
             sp.team_name,
             sp.home_abbreviation,
@@ -189,6 +307,26 @@ def _fetch_unified_projection_rows(
             sp.home_away,
             sp.event_name
         FROM [dbo].[sportsbook_projection] sp
+        LEFT JOIN [dbo].[parlay_play_match] m
+            ON sp.sportsbook = N'parlay_play'
+           AND m.[{match_pk}] = TRY_CAST(
+                NULLIF(LTRIM(RTRIM(CAST(sp.source_game_id AS nvarchar(50)))), N'') AS bigint
+            )
+        LEFT JOIN [dbo].[parlay_play_league] l_match
+            ON sp.sportsbook = N'parlay_play'
+           AND l_match.[{league_pk}] = m.league_id
+        LEFT JOIN [dbo].[parlay_play_league] l_sid
+            ON sp.sportsbook = N'parlay_play'
+           AND l_sid.[{league_pk}] = sp.league_id
+        LEFT JOIN [dbo].[prizepicks_projection] pproj
+            ON sp.sportsbook = N'prizepicks'
+           AND pproj.projection_id = sp.external_projection_id
+        LEFT JOIN [dbo].[prizepicks_league] pl
+            ON sp.sportsbook = N'prizepicks'
+           AND LTRIM(RTRIM(pl.league_id)) = LTRIM(RTRIM(CONVERT(nvarchar(20), sp.league_id)))
+        LEFT JOIN [dbo].[prizepicks_duration] ppdur
+            ON sp.sportsbook = N'prizepicks'
+           AND ppdur.duration_id = CONVERT(nvarchar(20), pproj.duration_id)
         WHERE {where_sql}
         ORDER BY sp.start_time, sp.player_name, sp.stat_type_name, sp.sportsbook, sp.external_projection_id
     """
@@ -223,6 +361,7 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
                 "team": row.get("team"),
                 "team_name": row.get("team_name"),
                 "league_id": row.get("league_id"),
+                "league": _league_label_unified(row),
                 "game": {
                     "start_time": _serialize_datetime(row.get("start_time")),
                     "event_name": row.get("event_name"),
@@ -242,6 +381,7 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
             player_item["team"] = row.get("team")
             player_item["team_name"] = row.get("team_name")
             player_item["league_id"] = row.get("league_id")
+            player_item["league"] = _league_label_unified(row)
             player_item["game"] = {
                 "start_time": _serialize_datetime(row.get("start_time")),
                 "event_name": row.get("event_name"),
@@ -310,26 +450,7 @@ def get_parlay_play_lines_by_match(
     """
     cursor = conn.cursor()
     try:
-        # Some deployments use `{table}_id` instead of `id` as the PK column.
-        cursor.execute(
-            """
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'dbo'
-              AND TABLE_NAME = 'parlay_play_match'
-              AND COLUMN_NAME IN ('id', 'parlay_play_match_id')
-            """
-        )
-        match_pk_cols = {r[0] for r in cursor.fetchall()}
-        if "id" in match_pk_cols:
-            match_pk = "id"
-        elif "parlay_play_match_id" in match_pk_cols:
-            match_pk = "parlay_play_match_id"
-        else:
-            raise RuntimeError(
-                "Cannot resolve PK column for dbo.parlay_play_match. "
-                "Expected 'id' or 'parlay_play_match_id'."
-            )
+        match_pk = _parlay_play_match_pk_safe(conn)
 
         if date_from is None or date_to is None:
             end = datetime.now(timezone.utc).date()
@@ -593,6 +714,10 @@ def list_projections(
                     row[k] = float(v) if v is not None else None
                 else:
                     row[k] = v
+            if not (row.get("league") or "").strip():
+                ln = prizepicks_league_display_name(row.get("league_id"))
+                if ln:
+                    row["league"] = ln
             # line_underdog comes from get_projections (join via [player].underdog_player_id)
             display_name = (r.get("display_name") or r.get("pp_name") or "").strip()
             stat_type_name = normalize_for_join((r.get("stat_type_name") or "").strip())
