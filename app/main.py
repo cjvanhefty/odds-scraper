@@ -46,7 +46,17 @@ from cross_book_stat_normalize import (
     normalize_stat_basic,
     parlay_match_league_id_for_prizepicks,
     prizepicks_league_display_name,
+    sql_case_prizepicks_league_to_parlay_match_league_id,
 )
+
+
+def _merge_captured_stdio(stdout_s: str, stderr_s: str) -> str:
+    """Combine captured stdout/stderr (order: stdout then stderr), like subprocess capture_output."""
+    o = (stdout_s or "").rstrip()
+    e = (stderr_s or "").rstrip()
+    if o and e:
+        return o + "\n" + e
+    return o or e
 
 
 def _lookup_parlay_line(
@@ -108,6 +118,54 @@ def _parlay_slate_date_bounds(projections: list) -> tuple[str, str] | None:
     lo = lo - timedelta(days=1)
     hi = hi + timedelta(days=1)
     return (lo.isoformat(), hi.isoformat())
+
+
+def _unified_grouped_parlay_date_bounds(grouped: list[dict]) -> tuple[str, str] | None:
+    """Calendar date bounds from unified grid ``game.start_time`` (same ±1 day expansion as PrizePicks path)."""
+    ds: list[date] = []
+    for p in grouped:
+        st = (p.get("game") or {}).get("start_time")
+        if not st:
+            continue
+        s = str(st).strip()
+        day = s[:10]
+        if len(day) != 10 or day[4] != "-" or day[7] != "-":
+            continue
+        try:
+            y, m, d = int(day[:4]), int(day[5:7]), int(day[8:10])
+            ds.append(date(y, m, d))
+        except ValueError:
+            continue
+    if not ds:
+        return None
+    lo, hi = min(ds), max(ds)
+    lo = lo - timedelta(days=1)
+    hi = hi + timedelta(days=1)
+    return (lo.isoformat(), hi.isoformat())
+
+
+def _enrich_unified_grouped_with_parlay_play_lines(
+    grouped: list[dict],
+    parlay_play_scoped: dict,
+    parlay_play_fallback: dict,
+) -> None:
+    """Set ``line_parlay_play`` on each stat row (mirrors non-unified list_projections)."""
+    for player_item in grouped:
+        display_name = (player_item.get("display_name") or player_item.get("player") or "").strip()
+        pp_lid = player_item.get("league_id")
+        st = (player_item.get("game") or {}).get("start_time")
+        game_date = (str(st)[:10] if st else "") or ""
+        for stat in player_item.get("projections") or []:
+            raw_stat = (stat.get("stat_type_name") or "").strip()
+            norm_stat = (stat.get("stat_type_key") or "").strip() or normalize_for_join(raw_stat)
+            stat["line_parlay_play"] = _lookup_parlay_line(
+                parlay_play_scoped,
+                parlay_play_fallback,
+                pp_lid,
+                display_name,
+                norm_stat,
+                game_date,
+            )
 
 
 SPORTSBOOK_KEYS = ("prizepicks", "underdog", "parlay_play")
@@ -248,6 +306,8 @@ def _fetch_unified_projection_rows(
     where_sql = " AND ".join(where_parts)
     match_pk = _parlay_play_match_pk_safe(conn)
     league_pk = _parlay_play_league_pk_safe(conn)
+    # Parlay rows store PrizePicks league_id on sp.league_id; map to Parlay league PK for l_sid fallback.
+    parlay_league_for_l_sid = sql_case_prizepicks_league_to_parlay_match_league_id("sp.league_id")
     sql = f"""
         SELECT
             sp.sportsbook,
@@ -317,7 +377,7 @@ def _fetch_unified_projection_rows(
            AND l_match.[{league_pk}] = m.league_id
         LEFT JOIN [dbo].[parlay_play_league] l_sid
             ON sp.sportsbook = N'parlay_play'
-           AND l_sid.[{league_pk}] = sp.league_id
+           AND l_sid.[{league_pk}] = {parlay_league_for_l_sid}
         LEFT JOIN [dbo].[prizepicks_projection] pproj
             ON sp.sportsbook = N'prizepicks'
            AND pproj.projection_id = sp.external_projection_id
@@ -336,8 +396,43 @@ def _fetch_unified_projection_rows(
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def _safe_int_league_id(val) -> int | None:
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _non_null_leagues_by_player_lower(rows: list[dict]) -> dict[str, set[int]]:
+    """Collect PrizePicks/Parlay (etc.) league_ids per player so Underdog rows with NULL league_id can merge."""
+    from collections import defaultdict
+
+    m: dict[str, set[int]] = defaultdict(set)
+    for r in rows:
+        pn = (r.get("player_name") or "").strip().lower()
+        if not pn:
+            continue
+        lid = _safe_int_league_id(r.get("league_id"))
+        if lid is not None:
+            m[pn].add(lid)
+    return m
+
+
+def _player_bucket_pkey(player_lower: str, row_league_id, leagues_for_name: set[int]) -> tuple[str, int | None]:
+    """Bucket key: (name, league). Rows with NULL league merge into the sole non-null league for that name."""
+    lid = _safe_int_league_id(row_league_id)
+    if lid is not None:
+        return (player_lower, lid)
+    if len(leagues_for_name) == 1:
+        return (player_lower, next(iter(leagues_for_name)))
+    return (player_lower, None)
+
+
 def _group_player_projections(rows: list[dict], stat_type_filter: str | None) -> list[dict]:
     wanted_stat = normalize_for_join((stat_type_filter or "").strip()) if stat_type_filter and stat_type_filter.strip() else None
+    leagues_by_player = _non_null_leagues_by_player_lower(rows)
     grouped: dict[tuple, dict] = {}
     player_order: list[tuple] = []
     for row in rows:
@@ -350,9 +445,10 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
             continue
         if wanted_stat and stat_key != wanted_stat:
             continue
-        # Group by name *and* league so the same display name in NBA vs MLB (or any two sports)
-        # does not share one bucket; otherwise the parent's league_id can tag the wrong sport's stats.
-        pkey = (player_name.lower(), row.get("league_id"))
+        pn_lower = player_name.lower()
+        # Underdog sync often leaves league_id NULL (sport_id is not PrizePicks league space); merge into
+        # the player's single known league from PP/Parlay when unambiguous (see debug H2).
+        pkey = _player_bucket_pkey(pn_lower, row.get("league_id"), leagues_by_player.get(pn_lower, set()))
         player_item = grouped.get(pkey)
         if player_item is None:
             player_item = {
@@ -360,8 +456,8 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
                 "player": player_name,
                 "team": row.get("team"),
                 "team_name": row.get("team_name"),
-                "league_id": row.get("league_id"),
-                "league": _league_label_unified(row),
+                "league_id": pkey[1],
+                "league": _league_label_unified({**row, "league_id": pkey[1]}),
                 "game": {
                     "start_time": _serialize_datetime(row.get("start_time")),
                     "event_name": row.get("event_name"),
@@ -380,8 +476,8 @@ def _group_player_projections(rows: list[dict], stat_type_filter: str | None) ->
         if rank < player_item["__source_rank"]:
             player_item["team"] = row.get("team")
             player_item["team_name"] = row.get("team_name")
-            player_item["league_id"] = row.get("league_id")
-            player_item["league"] = _league_label_unified(row)
+            player_item["league_id"] = pkey[1]
+            player_item["league"] = _league_label_unified({**row, "league_id": pkey[1]})
             player_item["game"] = {
                 "start_time": _serialize_datetime(row.get("start_time")),
                 "event_name": row.get("event_name"),
@@ -634,13 +730,30 @@ def list_projections(
                 active_only=active_only,
             )
             grouped = _group_player_projections(unified_rows, stat_type)
+            if grouped:
+                slate_bounds = _unified_grouped_parlay_date_bounds(grouped)
+                if slate_bounds:
+                    d0, d1 = slate_bounds
+                    parlay_play_scoped, parlay_play_fallback = get_parlay_play_lines_by_match(
+                        conn, date_from=d0, date_to=d1
+                    )
+                else:
+                    parlay_play_scoped, parlay_play_fallback = get_parlay_play_lines_by_match(conn)
+            else:
+                parlay_play_scoped, parlay_play_fallback = {}, {}
             if page_size > 0:
                 total = len(grouped)
                 start = (page - 1) * page_size
                 end = start + page_size
                 items = grouped[start:end]
+                _enrich_unified_grouped_with_parlay_play_lines(
+                    items, parlay_play_scoped, parlay_play_fallback
+                )
                 body = {"items": items, "total": total, "page": page, "page_size": page_size}
                 return JSONResponse(content=body)
+            _enrich_unified_grouped_with_parlay_play_lines(
+                grouped, parlay_play_scoped, parlay_play_fallback
+            )
             return JSONResponse(content=grouped)
         projections = get_projections(
             conn,
@@ -1103,10 +1216,14 @@ def update_underdog_projections():
     from io import StringIO
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
+    stdout_cap = StringIO()
+    stderr_cap = StringIO()
     old_argv = sys.argv
     old_stdout = sys.stdout
+    old_stderr = sys.stderr
     sys.argv = argv
-    sys.stdout = StringIO()
+    sys.stdout = stdout_cap
+    sys.stderr = stderr_cap
     try:
         import underdog_scraper
 
@@ -1118,13 +1235,19 @@ def update_underdog_projections():
             try:
                 exit_code = fut.result(timeout=timeout_s)
             except FutureTimeoutError:
+                out = _merge_captured_stdio(stdout_cap.getvalue(), stderr_cap.getvalue())
+                if out.strip():
+                    raise HTTPException(
+                        status_code=504,
+                        detail="Update timed out\n\n--- scraper log ---\n" + out.strip()[-2000:],
+                    )
                 raise HTTPException(status_code=504, detail="Update timed out")
 
-        out = sys.stdout.getvalue()
+        out = _merge_captured_stdio(stdout_cap.getvalue(), stderr_cap.getvalue())
     except HTTPException:
         raise
     except Exception as e:
-        out = sys.stdout.getvalue()
+        out = _merge_captured_stdio(stdout_cap.getvalue(), stderr_cap.getvalue())
         tail = (out or "").strip()
         if len(tail) > 2500:
             tail = tail[-2500:]
@@ -1135,6 +1258,7 @@ def update_underdog_projections():
     finally:
         sys.argv = old_argv
         sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
     if exit_code != 0:
         tail = (out or "").strip()
