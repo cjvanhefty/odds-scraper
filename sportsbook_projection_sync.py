@@ -21,14 +21,18 @@ def _table_exists(conn, schema: str, name: str) -> bool:
 
 
 def _sql_parlay_match_league_id_as_prizepicks() -> str:
-    """Expression mapping Parlay `match.league_id` to PrizePicks `league_id` (see cross_book_stat_normalize)."""
+    """Expression mapping Parlay ``match.league_id`` to PrizePicks ``league_id``.
+
+    Unmapped Parlay leagues must be NULL (not raw ``m.league_id``) so ``sportsbook_projection.league_id``
+    for Parlay rows stays in PrizePicks league space and matches ``sql_case_prizepicks_league_to_parlay_match_league_id``.
+    """
     from cross_book_stat_normalize import PARLAY_MATCH_LEAGUE_ID_TO_PRIZEPICKS
 
     pairs = sorted(PARLAY_MATCH_LEAGUE_ID_TO_PRIZEPICKS.items())
     if not pairs:
-        return "m.league_id"
+        return "CAST(NULL AS int)"
     whens = " ".join(f"WHEN m.league_id = {pl} THEN {pp}" for pl, pp in pairs)
-    return f"CASE {whens} ELSE m.league_id END"
+    return f"CASE {whens} ELSE CAST(NULL AS int) END"
 
 
 def _resolve_pk_column(conn, table_name: str) -> str:
