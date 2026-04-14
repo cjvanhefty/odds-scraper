@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sportsbook_dimension_sync import ensure_sportsbook_dimension_tables, sync_sportsbook_dimensions
+
 
 def _table_exists(conn, schema: str, name: str) -> bool:
     cursor = conn.cursor()
@@ -811,6 +813,7 @@ def sync_sportsbook_projection_snapshot(
     conn = _get_db_conn(server, database, user, password, trusted_connection)
     try:
         ensure_sportsbook_projection_table(conn)
+        ensure_sportsbook_dimension_tables(conn)
         with conn:
             if sb == "prizepicks":
                 _archive_line_changes_prizepicks(conn)
@@ -825,6 +828,7 @@ def sync_sportsbook_projection_snapshot(
                 _sync_parlay_play_from_stage(conn)
                 _archive_missing_from_stage(conn, "parlay_play", "parlay_play_projection_stage")
             _archive_started_projections(conn)
+            sync_sportsbook_dimensions(conn)
 
         cursor = conn.cursor()
         cursor.execute(
