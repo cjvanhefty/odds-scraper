@@ -287,6 +287,21 @@ def _apply_env_parlay_league_overrides(m: dict[int, int | None]) -> None:
 
 _apply_env_parlay_league_overrides(PRIZEPICKS_TO_PARLAY_MATCH_LEAGUE_ID)
 
+
+def sql_case_prizepicks_league_to_parlay_match_league_id(league_expr: str = "sp.league_id") -> str:
+    """SQL expression: PrizePicks ``league_id`` -> Parlay ``match.league_id`` / ``parlay_play_league`` PK.
+
+    ``sportsbook_projection.league_id`` for Parlay Play rows is stored in PrizePicks league space
+    (see ``_sql_parlay_match_league_id_as_prizepicks``); do not join ``parlay_play_league`` on that
+    column without mapping.
+    """
+    pairs = sorted((pp, pl) for pp, pl in PRIZEPICKS_TO_PARLAY_MATCH_LEAGUE_ID.items() if pl is not None)
+    if not pairs:
+        return "CAST(NULL AS int)"
+    whens = " ".join(f"WHEN {league_expr} = {pp} THEN {pl}" for pp, pl in pairs)
+    return f"CASE {whens} ELSE CAST(NULL AS int) END"
+
+
 # Labels for PrizePicks `league_id` (same numeric space as `sportsbook_projection.league_id`
 # after Parlay→PP mapping). Used when the DB has no `prizepicks_player.league` text (e.g. unified store).
 PRIZEPICKS_LEAGUE_DISPLAY_NAME: dict[int, str] = {
