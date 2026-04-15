@@ -1,0 +1,213 @@
+-- =============================================
+-- CORE TABLES (MSSQL)
+-- =============================================
+
+CREATE TABLE books (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    name VARCHAR(50) UNIQUE NOT NULL CHECK (name IN ('Underdog', 'ParlayPlay', 'PrizePicks'))
+);
+
+CREATE TABLE sports (id INT IDENTITY(1,1) PRIMARY KEY, name VARCHAR(50) UNIQUE NOT NULL);
+CREATE TABLE leagues (id INT IDENTITY(1,1) PRIMARY KEY, sport_id INT FOREIGN KEY REFERENCES sports(id), name VARCHAR(100) NOT NULL, abbreviation VARCHAR(20), UNIQUE(sport_id, name));
+CREATE TABLE teams (id INT IDENTITY(1,1) PRIMARY KEY, league_id INT FOREIGN KEY REFERENCES leagues(id), name VARCHAR(100) NOT NULL, abbreviation VARCHAR(10));
+CREATE TABLE players (id INT IDENTITY(1,1) PRIMARY KEY, league_id INT FOREIGN KEY REFERENCES leagues(id), first_name VARCHAR(50), last_name VARCHAR(50), position VARCHAR(20));
+
+CREATE TABLE book_players (id INT IDENTITY(1,1) PRIMARY KEY, book_id INT FOREIGN KEY REFERENCES books(id), player_id INT FOREIGN KEY REFERENCES players(id), book_player_id VARCHAR(100) NOT NULL, display_name VARCHAR(100), image_url VARCHAR(MAX), jersey_number VARCHAR(10), UNIQUE(book_id, book_player_id));
+CREATE TABLE book_teams (id INT IDENTITY(1,1) PRIMARY KEY, book_id INT FOREIGN KEY REFERENCES books(id), team_id INT FOREIGN KEY REFERENCES teams(id), book_team_id VARCHAR(100) NOT NULL, UNIQUE(book_id, book_team_id));
+
+CREATE TABLE games (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    sport_id INT FOREIGN KEY REFERENCES sports(id),
+    league_id INT FOREIGN KEY REFERENCES leagues(id),
+    home_team_id INT FOREIGN KEY REFERENCES teams(id),
+    away_team_id INT FOREIGN KEY REFERENCES teams(id),
+    scheduled_at DATETIME2 NOT NULL,
+    status VARCHAR(30) DEFAULT 'scheduled',
+    abbreviated_title VARCHAR(50),
+    full_title VARCHAR(150)
+);
+
+CREATE TABLE book_games (id INT IDENTITY(1,1) PRIMARY KEY, book_id INT FOREIGN KEY REFERENCES books(id), game_id INT FOREIGN KEY REFERENCES games(id), external_game_id VARCHAR(100) NOT NULL, UNIQUE(book_id, external_game_id));
+
+CREATE TABLE stat_types (id INT IDENTITY(1,1) PRIMARY KEY, sport_id INT FOREIGN KEY REFERENCES sports(id), canonical_name VARCHAR(100) NOT NULL, display_name VARCHAR(100), unit VARCHAR(20), UNIQUE(sport_id, canonical_name));
+CREATE TABLE book_stat_types (id INT IDENTITY(1,1) PRIMARY KEY, stat_type_id INT FOREIGN KEY REFERENCES stat_types(id), book_id INT FOREIGN KEY REFERENCES books(id), book_stat_code VARCHAR(100) NOT NULL, UNIQUE(book_id, book_stat_code));
+
+CREATE TABLE active_projections (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    book_id INT FOREIGN KEY REFERENCES books(id),
+    book_game_id INT FOREIGN KEY REFERENCES book_games(id),
+    target_type VARCHAR(10) CHECK (target_type IN ('player','team')),
+    player_id INT FOREIGN KEY REFERENCES players(id),
+    team_id INT FOREIGN KEY REFERENCES teams(id),
+    stat_type_id INT FOREIGN KEY REFERENCES stat_types(id),
+    line_value DECIMAL(10,2) NOT NULL,
+    over_american_price INT,
+    under_american_price INT,
+    over_decimal_price DECIMAL(6,2),
+    under_decimal_price DECIMAL(6,2),
+    is_promo BIT DEFAULT 0,
+    promo_multiplier DECIMAL(6,2),
+    has_alternates BIT DEFAULT 0,
+    external_projection_id VARCHAR(100),
+    provider VARCHAR(50),
+    rank INT,
+    last_updated DATETIME2 DEFAULT GETUTCDATE(),
+    UNIQUE(book_id, external_projection_id)
+);
+
+CREATE TABLE alt_lines (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    active_projection_id INT FOREIGN KEY REFERENCES active_projections(id),
+    line_value DECIMAL(10,2) NOT NULL,
+    over_american_price INT,
+    under_american_price INT,
+    over_decimal_price DECIMAL(6,2),
+    under_decimal_price DECIMAL(6,2),
+    is_main_line BIT DEFAULT 0
+);
+
+-- =============================================
+-- INDEXED VIEW (MSSQL equivalent of Materialized View)
+-- =============================================
+
+CREATE VIEW vw_current_projections WITH SCHEMABINDING AS
+SELECT 
+    ap.id AS projection_id,
+    b.name AS book_name,
+    b.id AS book_id,
+    ap.external_projection_id,
+    ap.player_id,
+    ap.team_id,
+    bg.game_id,
+    ap.stat_type_id,
+    ap.line_value,
+    ap.over_american_price,
+    ap.under_american_price,
+    ap.over_decimal_price,
+    ap.under_decimal_price,
+    ap.is_promo,
+    ap.promo_multiplier,
+    ap.has_alternates,
+    ap.provider,
+    ap.rank,
+    ap.last_updated,
+    ap.target_type,
+    p.full_name,
+    p.position,
+    bp.image_url AS player_image_url,
+    bp.jersey_number,
+    st.canonical_name,
+    st.display_name AS stat_display_name,
+    st.unit,
+    g.abbreviated_title,
+    g.full_title,
+    g.scheduled_at,
+    g.status,
+    l.id AS league_id,
+    l.name AS league_name,
+    l.abbreviation AS league_abbr,
+    s.name AS sport_name
+FROM dbo.active_projections ap
+JOIN dbo.books b ON b.id = ap.book_id
+JOIN dbo.book_games bg ON bg.id = ap.book_game_id
+JOIN dbo.games g ON g.id = bg.game_id
+JOIN dbo.leagues l ON l.id = g.league_id
+JOIN dbo.sports s ON s.id = l.sport_id
+LEFT JOIN dbo.players p ON p.id = ap.player_id
+LEFT JOIN dbo.book_players bp ON bp.player_id = p.id AND bp.book_id = b.id
+LEFT JOIN dbo.stat_types st ON st.id = ap.stat_type_id;
+
+CREATE UNIQUE CLUSTERED INDEX idx_vw_current_projections ON vw_current_projections(projection_id);
+
+-- =============================================
+-- STORED PROCEDURE FOR MSSQL
+-- =============================================
+
+CREATE OR ALTER PROCEDURE get_current_projections
+    @league_id INT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    WITH filtered_data AS (
+        SELECT * FROM vw_current_projections
+        WHERE league_id = @league_id OR @league_id IS NULL
+    ),
+    base AS (
+        SELECT 
+            GETUTCDATE() AS last_updated,
+            (SELECT STRING_AGG(CAST((
+                SELECT id = league_id, 
+                       name = league_name, 
+                       abbreviation = league_abbr, 
+                       sport_name = sport_name 
+                FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+            ) AS NVARCHAR(MAX)), ',') 
+            WITHIN GROUP (ORDER BY league_name)) AS available_leagues_json,
+            
+            (SELECT STRING_AGG(CAST((
+                SELECT id = player_id, 
+                       full_name = full_name, 
+                       position = position, 
+                       image_url = player_image_url 
+                FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+            ) AS NVARCHAR(MAX)), ',') 
+            WITHIN GROUP (ORDER BY full_name)) AS players_json,
+
+            (SELECT STRING_AGG(CAST((
+                SELECT id = game_id, 
+                       abbreviated_title = abbreviated_title, 
+                       full_title = full_title, 
+                       scheduled_at = scheduled_at, 
+                       status = status, 
+                       league_id = league_id 
+                FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+            ) AS NVARCHAR(MAX)), ',') 
+            WITHIN GROUP (ORDER BY scheduled_at)) AS games_json,
+
+            (SELECT STRING_AGG(CAST((
+                SELECT id = stat_type_id, 
+                       canonical_name = canonical_name, 
+                       display_name = stat_display_name, 
+                       unit = unit 
+                FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+            ) AS NVARCHAR(MAX)), ',') 
+            WITHIN GROUP (ORDER BY stat_display_name)) AS stat_types_json
+        FROM filtered_data
+    ),
+    projections_agg AS (
+        SELECT STRING_AGG(CAST((
+            SELECT projection_id, book_name, book_id, external_projection_id, player_id, game_id, 
+                   stat_type_id, line_value, over_american_price, under_american_price,
+                   over_decimal_price, under_decimal_price, is_promo, promo_multiplier,
+                   has_alternates, provider, rank, last_updated, league_id
+            FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+        ) AS NVARCHAR(MAX)), ',') AS projections_json
+        FROM filtered_data
+    ),
+    alt_agg AS (
+        SELECT STRING_AGG(CAST((
+            SELECT projection_id = al.active_projection_id,
+                   line_value = al.line_value,
+                   over_american_price = al.over_american_price,
+                   under_american_price = al.under_american_price,
+                   over_decimal_price = al.over_decimal_price,
+                   under_decimal_price = al.under_decimal_price,
+                   is_main_line = al.is_main_line
+            FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+        ) AS NVARCHAR(MAX)), ',') AS alt_lines_json
+        FROM alt_lines al
+        WHERE al.active_projection_id IN (SELECT projection_id FROM filtered_data)
+    )
+    SELECT 
+        last_updated,
+        available_leagues = JSON_QUERY('[' + ISNULL(available_leagues_json, '') + ']'),
+        players = JSON_QUERY('[' + ISNULL(players_json, '') + ']'),
+        games = JSON_QUERY('[' + ISNULL(games_json, '') + ']'),
+        stat_types = JSON_QUERY('[' + ISNULL(stat_types_json, '') + ']'),
+        projections = JSON_QUERY('[' + ISNULL(projections_json, '') + ']'),
+        alt_lines = JSON_QUERY('[' + ISNULL(alt_lines_json, '') + ']')
+    FROM base
+    CROSS JOIN projections_agg
+    CROSS JOIN alt_agg;
+END;
