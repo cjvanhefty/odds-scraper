@@ -1,12 +1,23 @@
 # Plan: Database Structure and App Functionality Changes
 
-Status: **Draft for discussion** — no code or schema has been changed in this branch.
-Scope: a concrete proposal for what to change in the database (`Props` on MSSQL) and
-in the `app/` FastAPI backend + static frontend, with explicit trade-offs and an ordered
-delivery plan.
+Status: **Accepted — hybrid rollout (Option A via the staged path in section 3.0.3a).**
+No code or schema has been changed in this branch yet. Scope: a concrete
+proposal for what to change in the database (`Props` on MSSQL) and in the
+`app/` FastAPI backend + static frontend, with explicit trade-offs and an
+ordered delivery plan.
 
 This plan deliberately focuses on **what should change and why**, and leaves
 calendar estimates out — the work is scoped by subsystem and risk instead.
+
+**Decision log**
+
+- *Section 3.0 (duplicate `sportsbook_*` rows):* **Hybrid rollout accepted.**
+  Xref tables become authoritative for book-specific ids across every
+  dimension. Per-book id columns on the canonical tables stay for one release
+  as an auto-populated mirror to avoid breaking existing queries, then are
+  dropped in the following release. See section 3.0.3a for the pros/cons this
+  was picked against, and section 6.1 for the PR-sized Phase 1 breakdown that
+  implements it.
 
 ---
 
@@ -579,30 +590,202 @@ each is independently revertible.
 
 ### 6.1 Phase 1 — foundations + deduplicate dimension tables (no user-visible changes)
 
-1. Add `dbo.schema_migrations` + a Python runner (`scripts/migrate.py`). Wrap
-   all existing `schema/*.sql` idempotent scripts as migration
-   `0000_baseline.sql`.
-2. **Fix duplicate canonical rows (section 3.0)** — the first visible
-   improvement:
-   1. Create normalization UDFs (`fn_normalize_person_name`,
-      `fn_normalize_team_abbrev`, `fn_normalize_stat_basic`,
-      `fn_game_natural_key`) and their Python mirrors.
-   2. Create `sportsbook_{team,stat_type,game,league,sport}_xref` tables.
-   3. Create `ref.team_alias` and `ref.stat_alias` alias lookup tables, seeded
-      from known trouble cases.
-   4. Run the consolidation migration
-      (`0001_consolidate_sportsbook_dimensions.sql`) that backfills xrefs,
-      merges survivors, repoints downstream FKs, and adds the computed-column
-      unique indexes listed in 3.0.2.
-   5. Reshape `sportsbook_dimension_sync.py` to xref-first resolution and
-      generic dedup; keep the per-book columns writable by trigger for one
-      release.
-   6. Add a lightweight integrity check (`scripts/check_dimension_dupes.py`)
-      that fails CI when any `sportsbook_*` table has more than one row per
-      natural key.
-3. Move staging-only tables into a new `stage` schema via a migration that
-   renames or creates synonyms for backward compatibility.
-4. Migrate `sportsbook_stat_type.canonical_stat_key` off the UDF from step 2.
+Implements the hybrid rollout for section 3.0. Each numbered item is a
+separate PR, independently revertible, and ordered so nothing downstream ever
+sees a broken intermediate state. No user-visible behavior changes until
+step 1.10.
+
+**1.1 — Migrations runner**
+
+- Add `dbo.schema_migrations (version nvarchar(20) PK, applied_at, checksum,
+  script_name)`.
+- Add `scripts/migrate.py`: reads `schema/migrations/NNNN_*.sql` in order,
+  splits on `GO`, executes in a single transaction per file, records the row
+  in `schema_migrations`. Re-runs are idempotent (skips already-applied
+  versions).
+- Wrap every current idempotent `schema/*.sql` script as migration
+  `0000_baseline.sql`. The existing per-feature `run_order.md` docs stay as
+  historical breadcrumbs.
+- CI job runs `python scripts/migrate.py --check` to fail when a migration
+  file is edited after being applied (checksum mismatch).
+
+**1.2 — Normalization UDFs + Python mirrors**
+
+- Migration `0001_normalization_udfs.sql`:
+  - `dbo.fn_normalize_person_name(@n nvarchar(255))` — lowercase, strip
+    accents, remove `.`, `'`, `"`, `,`, `-`, collapse whitespace, drop
+    trailing suffixes (`jr`, `sr`, `ii`, `iii`, `iv`, `v`).
+  - `dbo.fn_normalize_team_abbrev(@a nvarchar(20), @canonical_league_id int)`
+    — uppercase + alias-table lookup.
+  - `dbo.fn_normalize_stat_basic(@s nvarchar(120))` — mirrors the Python
+    `normalize_for_join`.
+  - `dbo.fn_game_natural_key(@league_id int, @home_tid bigint,
+    @away_tid bigint, @start_date date)` — returns a single nvarchar key.
+- Add Python mirrors in `cross_book_stat_normalize.py`
+  (`normalize_person_name`, `normalize_team_abbrev`, `game_natural_key`) so
+  scrapers and T-SQL agree bit-for-bit.
+- Unit tests on the Python side, plus a SQL test script that asserts
+  UDF output matches Python output for ~50 fixtures.
+
+**1.3 — Alias reference tables**
+
+- Migration `0002_ref_alias_tables.sql` creates `ref` schema and:
+  - `ref.team_alias (canonical_league_id int, source nvarchar(30),
+    alias nvarchar(40), canonical_team_abbrev nvarchar(20), PRIMARY KEY
+    (canonical_league_id, source, alias))`.
+  - `ref.stat_alias (canonical_sport_id bigint, source nvarchar(30),
+    alias_normalized nvarchar(120), canonical_stat_key nvarchar(80),
+    PRIMARY KEY (canonical_sport_id, source, alias_normalized))`.
+  - `ref.person_alias (canonical_league_id int, source nvarchar(30),
+    alias_normalized nvarchar(255), canonical_display_name nvarchar(255),
+    PRIMARY KEY (canonical_league_id, source, alias_normalized))` — optional,
+    populated lazily when the dedup audit flags a mismatch.
+- Seeds for known trouble cases (harvested from current duplicate rows before
+  they are collapsed): a `scripts/seed_aliases.py` that reads the current
+  `sportsbook_*` tables, proposes a seed file (`schema/seeds/*.sql`), and
+  writes it for review. Reviewing + merging the seed file is part of this PR.
+
+**1.4 — New xref tables for every dimension**
+
+- Migration `0003_sportsbook_xref_tables.sql`:
+  - `sportsbook_team_xref`, `sportsbook_stat_type_xref`,
+    `sportsbook_game_xref`, `sportsbook_league_xref`,
+    `sportsbook_sport_xref` — all shaped like the existing
+    `sportsbook_player_xref` plus an extra column
+    `external_id_kind nvarchar(20) NOT NULL` (`'id'`, `'ppid'`,
+    `'pickem_id'`, …) baked into the PK so one book can register multiple
+    id namespaces per canonical row without collision.
+- Extend the existing `sportsbook_player_xref` with
+  `external_id_kind` (backfilled from the current prefixed
+  `external_player_id` values: `'player_id:…' → 'player_id'`,
+  `'ppid:…' → 'ppid'`) in the same migration.
+- FKs on every xref: `sportsbook_player_xref_player` etc. already exist for
+  players; add the equivalents for the new tables.
+
+**1.5 — Normalized-name + natural-key computed columns**
+
+- Migration `0004_natural_key_columns.sql` adds PERSISTED computed columns
+  on each dimension (e.g. `sportsbook_player.display_name_normalized AS
+  dbo.fn_normalize_person_name(display_name) PERSISTED`) and matching
+  filtered unique indexes from section 3.0.2.
+- The unique indexes are added **as `NOT FOR REPLICATION`** and created
+  online where the edition supports it. If a duplicate survives the
+  consolidation migration in 1.6, the index creation fails loudly — this is
+  the guardrail that prevents a silent regression.
+
+**1.6 — One-time consolidation migration**
+
+- Migration `0005_consolidate_sportsbook_dimensions.sql`. Runs in a single
+  transaction per dimension. For each of sport / league / team / stat_type /
+  player / game:
+  1. Backfill the xref table from the existing per-book id columns. Every
+     non-NULL `sportsbook_player.prizepicks_player_id`, every
+     `sportsbook_team.underdog_team_id`, etc. produces one row.
+  2. Pick a survivor per natural key (lowest id).
+  3. `COALESCE` every non-survivor row's attributes onto the survivor.
+  4. Repoint xref rows to the survivor.
+  5. Repoint every downstream FK: `sportsbook_projection.sportsbook_player_id`,
+     `sportsbook_projection_history.sportsbook_player_id`,
+     `sportsbook_game.home_sportsbook_team_id/away_sportsbook_team_id`,
+     plus anything surfaced by a `sys.foreign_keys` audit run at the start
+     of the migration (recorded in a `#fk_audit` temp table and logged).
+  6. Delete the losers.
+  7. Assert the unique indexes from 1.5 are valid (they fail loudly if step
+     2–5 missed a group).
+- Before committing, write a summary row per table to a new audit table
+  `dbo.sportsbook_dedup_audit(migration_version, table_name, rows_before,
+  rows_after, groups_merged, run_at)` so operators can verify the numbers
+  look right before Phase 1 proceeds.
+- Ships with a dry-run mode (`--dry-run` on the migrations runner, or
+  `@dry_run bit = 1` variable at the top of the script) that runs steps 1–5
+  to temp tables and prints what it would do.
+
+**1.7 — Xref-first resolution in sync code**
+
+- Refactor `sportsbook_dimension_sync.py`:
+  - Introduce `_resolve_or_create_canonical(conn, dimension, natural_key,
+    attributes, external_id_bindings)` — the single helper every `_sync_*`
+    function uses. Looks up via xref first, falls back to natural key, only
+    creates a canonical row when both miss.
+  - `_consolidate_sportsbook_player_dupes` is replaced by
+    `_consolidate_sportsbook_dimension_dupes(table)` using the natural-key
+    columns from 1.5.
+  - Remove direct writes to `sportsbook_player.prizepicks_player_id` etc.
+    in the per-book `_sync_*` branches — those columns are now a mirror, not
+    the source of truth (see 1.8).
+- Extend scrapers (`prizepicks_scraper.py`, `underdog_scraper.py`,
+  `parlayplay_scraper.py`) only where they currently write canonical ids
+  directly — most write to stage tables, which is unaffected. Any direct
+  canonical writes go through the new helper.
+
+**1.8 — "Preferred id per book" mirror (keeps existing queries working)**
+
+- Migration `0006_preferred_book_id_triggers.sql` adds an AFTER INSERT/UPDATE
+  trigger on each xref table that recomputes the matching
+  canonical-table column (`sportsbook_player.prizepicks_player_id`, etc.)
+  as the "preferred" id per book: lowest `external_id_kind` priority order
+  (`player_id > ppid`), then earliest `created_at`.
+- Alternatively, and preferred for simplicity, a single stored proc
+  `dbo.refresh_preferred_book_ids` is called at the end of
+  `sync_sportsbook_dimensions(...)`. Triggers are only used if we ever see
+  direct xref inserts outside the sync path.
+- After this step the per-book columns on the canonical tables still exist
+  and still contain sensible values, so every existing query, view, and
+  scraper read keeps working unchanged. This is the entire point of the
+  hybrid rollout.
+
+**1.9 — Compatibility views + CI guardrails**
+
+- Migration `0007_compat_views.sql`:
+  - `dbo.vw_sportsbook_player_book_ids` — pivots xref into the old
+    `(sportsbook_player_id, prizepicks_player_id, underdog_player_id,
+    parlay_play_player_id, …)` shape so ad-hoc SQL and BI keep a one-line
+    migration path for when the columns drop in step 1.11.
+  - Equivalent views for `team`, `stat_type`, `game`, `league`, `sport`.
+- `scripts/check_dimension_dupes.py` — runs in CI and fails when any
+  `sportsbook_*` table has >1 row per natural key, or when the xref tables
+  contain rows pointing to deleted canonical rows, or when the preferred-id
+  mirror disagrees with xref.
+
+**1.10 — App reads switch to xref-first**
+
+- Update `app/main.py` / `projection_over_streak.py` / `app/db.py` helpers to
+  resolve `sportsbook_player_id` for a given scraper payload via
+  `sportsbook_player_xref` instead of
+  `WHERE prizepicks_player_id = ?`. Keep the old path behind a
+  `PROPS_NAME_FALLBACK_ENABLED=1` env flag for one release.
+- Once dashboards and queries have run a release cycle on the new path,
+  flip the env flag to `0` by default.
+
+**1.11 — Drop per-book columns (separate, later PR — not in Phase 1)**
+
+- Migration `0008_drop_per_book_id_columns.sql` — removes
+  `prizepicks_player_id`, `underdog_player_id`, `parlay_play_player_id` from
+  `sportsbook_player` (and the equivalents on the other dimensions) plus the
+  triggers/procs and the mirror step. Ships only after at least one release
+  has been live on the xref-first path and the compat views have stood in
+  for ad-hoc consumers. Listed here so it isn't forgotten; do **not** ship
+  it as part of Phase 1.
+
+**1.12 — `stage` schema split**
+
+- Move staging-only tables into a new `stage` schema via a migration that
+  renames (not copies) and creates synonyms in `dbo` for one release. This
+  is independent of the dedup work and is grouped under Phase 1 only
+  because it's also a "DDL cleanup" step; it can ship in parallel with or
+  after 1.10.
+
+**Phase 1 acceptance criteria**
+
+- Every `sportsbook_*` dimension table has exactly one row per natural key
+  (enforced by the filtered unique indexes from 1.5, and verified by the
+  CI check in 1.9).
+- Every existing query against `sportsbook_player.prizepicks_player_id` (and
+  the equivalent columns on the other tables) keeps returning a sensible
+  value via the preferred-id mirror.
+- `sportsbook_dedup_audit` has a row per dimension showing rows merged, and
+  the numbers look plausible when eyeballed.
+- `scripts/check_dimension_dupes.py` passes in CI.
 
 ### 6.2 Phase 2 — canonical ids on facts
 
