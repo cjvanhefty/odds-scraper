@@ -478,7 +478,13 @@ WITH SCHEMABINDING
 AS
 BEGIN
     DECLARE @lid nvarchar(20) = ISNULL(CAST(@league_id AS nvarchar(20)), N'');
-    DECLARE @dt  nvarchar(10) = ISNULL(CONVERT(nvarchar(10), @start_date, 23), N'');
+    DECLARE @dt  nvarchar(10) =
+        CASE WHEN @start_date IS NULL THEN N''
+             ELSE
+                 CAST(YEAR(@start_date) AS nvarchar(4)) + N'-' +
+                 RIGHT(N'00' + CAST(MONTH(@start_date) AS nvarchar(2)), 2) + N'-' +
+                 RIGHT(N'00' + CAST(DAY(@start_date) AS nvarchar(2)), 2)
+        END;
     DECLARE @h   nvarchar(20) = ISNULL(CAST(@home_team_id AS nvarchar(20)), N'');
     DECLARE @a   nvarchar(20) = ISNULL(CAST(@away_team_id AS nvarchar(20)), N'');
     RETURN @lid + N'|' + @dt + N'|' + @h + N'|' + @a;

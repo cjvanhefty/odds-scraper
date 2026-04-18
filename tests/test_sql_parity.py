@@ -293,9 +293,7 @@ def _sql_normalize_team_abbrev(abbrev: str | None, _league_id: int | None = None
 
 
 def _sql_game_natural_key(league_id, home_team_id, away_team_id, start_date) -> str:
-    # SQL builds the string using ISNULL(CAST(... AS nvarchar), N'').
-    # CONVERT(nvarchar(10), @start_date, 23) is YYYY-MM-DD or '' when the param
-    # is NULL. The live-DB checker passes a parseable date or NULL; mirror that.
+    # SQL uses YEAR/MONTH/DAY on the date for an ISO yyyy-mm-dd fragment (empty when NULL).
     def part(v):
         return "" if v is None else str(v)
     date_part = ""

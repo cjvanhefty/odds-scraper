@@ -12,6 +12,10 @@ Usage (from repo root):
                                             # without executing it (for existing
                                             # databases that are already at that
                                             # state)
+    python scripts/migrate.py --sync-checksum 0001
+                                            # refresh dbo.schema_migrations.checksum
+                                            # for an applied version after editing
+                                            # that file on disk (then apply/--check)
 
 Migration files live in ``schema/migrations/`` and are named
 ``NNNN_snake_case.sql`` where ``NNNN`` is a 4-digit zero-padded version.
@@ -353,6 +357,51 @@ def _cmd_check(args) -> int:
     return 0
 
 
+def _cmd_sync_checksum(args) -> int:
+    """Point ``schema_migrations.checksum`` at the current file for an applied version."""
+    migrations = {m.version: m for m in _discover_migrations()}
+    version = str(args.sync_checksum).strip()
+    if version not in migrations:
+        print(f"version {version!r} not found in {MIGRATIONS_DIR}", file=sys.stderr)
+        return 2
+    m = migrations[version]
+    conn = _connect()
+    try:
+        _ensure_schema_migrations_table(conn)
+        applied = _fetch_applied(conn)
+        if version not in applied:
+            print(
+                f"version {version} is not recorded in dbo.schema_migrations; "
+                f"nothing to sync (use a normal apply or --mark-applied first).",
+                file=sys.stderr,
+            )
+            return 2
+        cursor = conn.cursor()
+        try:
+            new_cs = m.checksum()
+            cursor.execute(
+                "UPDATE dbo.schema_migrations SET checksum = ? WHERE version = ?",
+                (new_cs, version),
+            )
+            if cursor.rowcount != 1:
+                print(
+                    f"UPDATE schema_migrations expected 1 row, got {cursor.rowcount}",
+                    file=sys.stderr,
+                )
+                conn.rollback()
+                return 1
+            conn.commit()
+        finally:
+            cursor.close()
+        print(
+            f"synced checksum for {m.script_name} (version {version}) "
+            f"to file hash {new_cs[:12]}…"
+        )
+        return 0
+    finally:
+        conn.close()
+
+
 def _cmd_mark_applied(args) -> int:
     migrations = {m.version: m for m in _discover_migrations()}
     version = args.mark_applied
@@ -468,6 +517,14 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="VERSION",
         help="Record VERSION as applied without executing its SQL (for pre-existing databases).",
     )
+    sub.add_argument(
+        "--sync-checksum",
+        metavar="VERSION",
+        help=(
+            "Update the recorded checksum for an already-applied VERSION to match the file "
+            "on disk (use after intentionally editing that migration; then run apply/--check)."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -494,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_check(args)
     if args.mark_applied:
         return _cmd_mark_applied(args)
+    if args.sync_checksum:
+        return _cmd_sync_checksum(args)
     return _cmd_apply(args)
 
 
