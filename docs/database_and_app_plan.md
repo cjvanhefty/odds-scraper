@@ -261,6 +261,84 @@ that is **idempotent and re-runnable**, and runs in this order:
    callers don't break, but have them populated by a trigger that just reads
    from the xref ("preferred book id" = min by sort order).
 
+### 3.0.3a Pros / cons vs. keeping the current shape
+
+Two realistic options, plus the hybrid we actually recommend.
+
+**Option A — xref-first (this plan's default).**
+
+*Pros:*
+- Correct by construction for many-to-one (e.g. PrizePicks emitting five
+  `player_id`s per LeBron is five xref rows, not five canonical rows).
+- Adding a new book is data-only; no `ALTER TABLE` on `sportsbook_player`
+  every time.
+- Canonical rows stop being 2/3-NULL by design.
+- One uniform "look up xref → else resolve + create" helper for every scraper.
+- Dedup stops depending on name normalization for rows that already carry any
+  book's external id; normalization is only needed for brand-new rows.
+- Downstream FKs (`sportsbook_projection.sportsbook_player_id`, analytics)
+  become stable and unique per real person.
+- Clean audit trail per `(book, external_id)` with its own timestamps.
+
+*Cons:*
+- Reads that want a book-specific id become a JOIN (or a view). Mildly slower
+  and more verbose per call.
+- "Which PrizePicks id is the canonical one?" becomes an explicit decision
+  (preferred id selection) instead of being hidden by the dedup.
+- The consolidation migration is invasive: it repoints every downstream FK
+  and deletes losing rows. Failure mid-flight needs careful rollback.
+- Ad-hoc SQL and BI dashboards that used
+  `SELECT prizepicks_player_id FROM sportsbook_player` need a compatibility
+  view (`vw_sportsbook_player_book_ids`) to keep working.
+- Still requires the normalization layer to avoid duplicate canonical rows
+  when we *first* see a player from different books.
+
+**Option B — keep per-book id columns, harden dedup.**
+
+*Pros:*
+- No breaking schema change; every existing query keeps working.
+- Fastest "one book" reads (no join).
+- Lowest migration risk — DDL is nearly unchanged.
+- Most legible shape for SQL-first readers.
+- Smaller blast radius if we get normalization wrong (you get NULL-heavy rows,
+  not false merges).
+
+*Cons:*
+- Does not actually solve the root problem. PrizePicks will keep emitting
+  multiple `player_id`s per real person; with `UQ_sportsbook_player_pp` in
+  place you still get either duplicate canonical rows or lost-id rows or a
+  dropped unique index (at which point you've reinvented xref badly).
+- Dedup complexity keeps growing — every new scraper behavior is a new
+  special case in `_consolidate_sportsbook_player_dupes`.
+- You end up needing an alias table per book anyway (which is an xref in
+  disguise).
+- Adding a new book is a schema migration every time and the table becomes
+  mostly NULL past ~5 books.
+- Projection → player joins stay name-based when a projection's external id
+  is not the "preferred" one — a latent data-quality issue in analytics.
+- Future features (consensus lines, line movement, settled results, player
+  pages) all want "one stable id per real person" and will reintroduce xref
+  lookups anyway.
+
+**Recommended — Option A via a hybrid rollout:**
+
+1. Build xref tables for every dimension and make them authoritative for
+   reads + writes inside the sync code and scrapers (this is the work in
+   section 3.0.4).
+2. Keep the per-book columns on the canonical tables for one release, but
+   have them auto-populated from xref as the "preferred" id per book (via
+   trigger or at end of sync). Existing queries keep working unchanged.
+3. Run the one-time consolidation migration so today's duplicate rows
+   collapse.
+4. Add a CI check that every `sportsbook_*` table has exactly one row per
+   natural key.
+5. Drop the per-book columns in the release after once BI / ad-hoc consumers
+   have migrated to `vw_sportsbook_player_book_ids` (a pivot of xref in the
+   old column shape).
+
+This gets Option A's correctness with Option B's migration safety. The rest
+of section 3.0 is written assuming this sequence.
+
 ### 3.0.4 Reconfigured sync logic
 
 `sportsbook_dimension_sync.py` changes:
