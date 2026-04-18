@@ -263,14 +263,34 @@ GO
 
 
 ALTER_FN_CANONICAL = """\
--- 4. ALTER dbo.fn_canonical_stat_by_alnum to read from ref.stat_alias.
---    Same signature + semantics as migration 0001 (returns NULL on miss,
---    returns N'' on NULL/empty input). Lookup prefers a source-specific
---    row (reserved for future per-book aliases); falls back to the
---    cross-book '_any' row that seeds every current mapping.
+-- 4. Repoint dbo.fn_canonical_stat_by_alnum at ref.stat_alias.
 --
---    TOP(1) / ORDER BY makes the preference explicit so the query plan
---    is deterministic regardless of row order in the table.
+--    Why DROP + CREATE instead of plain ALTER:
+--    SQL Server 2016 raises error 3729 when you ALTER a schemabound
+--    function that is referenced by another schemabound function:
+--        Cannot ALTER 'dbo.fn_canonical_stat_by_alnum' because it is
+--        being referenced by object 'fn_normalize_stat_basic'.
+--    fn_normalize_stat_basic and fn_normalize_for_join both depend on
+--    fn_canonical_stat_by_alnum WITH SCHEMABINDING. We break the
+--    binding temporarily, ALTER the base, then recreate the dependents
+--    with bodies identical to migrations 0001/0002. The whole block
+--    runs inside the migration runner's transaction, so a failure in
+--    any batch rolls everything back -- including the dropped
+--    dependents -- and leaves the DB in its pre-migration state.
+--
+--    fn_normalize_stat_basic body: exactly as created in migration 0001.
+--    fn_normalize_for_join    body: exactly as altered in migration 0002
+--                                   (binary-collation compare on the
+--                                   alias-applied branch).
+
+IF OBJECT_ID(N'dbo.fn_normalize_for_join', N'FN') IS NOT NULL
+    DROP FUNCTION dbo.fn_normalize_for_join;
+GO
+
+IF OBJECT_ID(N'dbo.fn_normalize_stat_basic', N'FN') IS NOT NULL
+    DROP FUNCTION dbo.fn_normalize_stat_basic;
+GO
+
 ALTER FUNCTION dbo.fn_canonical_stat_by_alnum(@k nvarchar(120))
 RETURNS nvarchar(120)
 WITH SCHEMABINDING
@@ -283,6 +303,39 @@ BEGIN
     WHERE sa.[alias_alnum_key] = @k
     ORDER BY CASE WHEN sa.[source] = N'_any' THEN 1 ELSE 0 END, sa.[source];
     RETURN @v;
+END
+GO
+
+-- Recreate fn_normalize_stat_basic (body copied verbatim from 0001).
+CREATE FUNCTION dbo.fn_normalize_stat_basic(@s nvarchar(120))
+RETURNS nvarchar(120)
+WITH SCHEMABINDING
+AS
+BEGIN
+    IF @s IS NULL RETURN N'';
+    DECLARE @trimmed nvarchar(120) = LTRIM(RTRIM(@s));
+    IF LEN(@trimmed) = 0 RETURN N'';
+    DECLARE @mapped nvarchar(120) = dbo.fn_canonical_stat_by_alnum(dbo.fn_alnum_key(@trimmed));
+    IF @mapped IS NULL RETURN @trimmed;
+    RETURN @mapped;
+END
+GO
+
+-- Recreate fn_normalize_for_join (body copied verbatim from 0002, which
+-- forces binary collation on the 'alias applied' comparison).
+CREATE FUNCTION dbo.fn_normalize_for_join(@s nvarchar(120))
+RETURNS nvarchar(120)
+WITH SCHEMABINDING
+AS
+BEGIN
+    IF @s IS NULL RETURN N'';
+    DECLARE @trimmed nvarchar(120) = LTRIM(RTRIM(@s));
+    IF LEN(@trimmed) = 0 RETURN N'';
+    DECLARE @pre nvarchar(120) = dbo.fn_apply_join_aliases(@trimmed);
+    IF @pre <> @trimmed COLLATE Latin1_General_BIN2 RETURN @pre;
+    DECLARE @mapped nvarchar(120) = dbo.fn_canonical_stat_by_alnum(dbo.fn_alnum_key(@trimmed));
+    IF @mapped IS NULL RETURN @trimmed;
+    RETURN dbo.fn_apply_join_aliases(@mapped);
 END
 GO
 """
