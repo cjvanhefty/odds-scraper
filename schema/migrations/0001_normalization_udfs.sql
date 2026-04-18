@@ -310,13 +310,16 @@ GO
 
 -- dbo.fn_normalize_person_name(@n)
 -- Mirror of Python normalize_person_name. Steps, in order:
---   1. Strip diacritics on common Latin-1/Extended-A accented characters via TRANSLATE.
---      The TRANSLATE source/destination strings are auto-generated from
---      unicodedata.normalize('NFKD', ch) for cp in [0x00C0..0x017F] where the
---      stripped form is exactly one ASCII character. Characters whose NFKD
---      strip is a no-op (e.g. O-slash, lowercase L-stroke) are intentionally
---      omitted here so SQL leaves them alone, matching Python.
---   2. Lowercase.
+--   1. Lowercase.
+--   2. Strip diacritics on common Latin-1/Extended-A accented characters
+--      via stacked REPLACE(@s, NCHAR(cp), 'ascii'). TRANSLATE would be
+--      cleaner but is SQL Server 2017+; this works on 2016 and earlier.
+--      The (code point, ascii) pairs are auto-generated from
+--      unicodedata.normalize('NFKD', ch) for cp in [0x00C0..0x017F] where
+--      the stripped form is exactly one ASCII character. Characters whose
+--      NFKD strip is a no-op (O-slash, stroked L, dotless i, long s)
+--      are intentionally omitted so SQL leaves them alone, matching
+--      Python's NFKD behavior.
 --   3. Remove ., , ' " - and treat tab/CR/LF as spaces.
 --   4. Collapse consecutive spaces (stacked REPLACE handles up to 16 in a run).
 --   5. Trim.
@@ -331,12 +334,90 @@ AS
 BEGIN
     IF @n IS NULL RETURN N'';
     DECLARE @s nvarchar(300) = @n;
-    -- 1. Diacritic strip (auto-generated: 162 chars).
-    SET @s = TRANSLATE(@s,
-        N'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöùúûüýÿĀāĂăĄąĆćĈĉĊċČčĎďĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĨĩĪīĬĭĮįİĴĵĶķĹĺĻļĽľŃńŅņŇňŌōŎŏŐőŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſ',
-        N'AAAAAACEEEEIIIINOOOOOUUUUYaaaaaaceeeeiiiinooooouuuuyyAaAaAaCcCcCcCcDdEeEeEeEeEeGgGgGgGgHhIiIiIiIiIJjKkLlLlLlNnNnNnOoOoOoRrRrRrSsSsSsSsTtTtUuUuUuUuUuUuWwYyYZzZzZzs');
-    -- 2. Lowercase.
+    -- 1. Lowercase first so we only need one REPLACE per lowercase code point.
     SET @s = LOWER(@s);
+    -- 2. Diacritic strip (81 pairs, auto-generated from unicodedata).
+    SET @s = REPLACE(@s, NCHAR(224), N'a');  -- à -> a
+    SET @s = REPLACE(@s, NCHAR(225), N'a');  -- á -> a
+    SET @s = REPLACE(@s, NCHAR(226), N'a');  -- â -> a
+    SET @s = REPLACE(@s, NCHAR(227), N'a');  -- ã -> a
+    SET @s = REPLACE(@s, NCHAR(228), N'a');  -- ä -> a
+    SET @s = REPLACE(@s, NCHAR(229), N'a');  -- å -> a
+    SET @s = REPLACE(@s, NCHAR(231), N'c');  -- ç -> c
+    SET @s = REPLACE(@s, NCHAR(232), N'e');  -- è -> e
+    SET @s = REPLACE(@s, NCHAR(233), N'e');  -- é -> e
+    SET @s = REPLACE(@s, NCHAR(234), N'e');  -- ê -> e
+    SET @s = REPLACE(@s, NCHAR(235), N'e');  -- ë -> e
+    SET @s = REPLACE(@s, NCHAR(236), N'i');  -- ì -> i
+    SET @s = REPLACE(@s, NCHAR(237), N'i');  -- í -> i
+    SET @s = REPLACE(@s, NCHAR(238), N'i');  -- î -> i
+    SET @s = REPLACE(@s, NCHAR(239), N'i');  -- ï -> i
+    SET @s = REPLACE(@s, NCHAR(241), N'n');  -- ñ -> n
+    SET @s = REPLACE(@s, NCHAR(242), N'o');  -- ò -> o
+    SET @s = REPLACE(@s, NCHAR(243), N'o');  -- ó -> o
+    SET @s = REPLACE(@s, NCHAR(244), N'o');  -- ô -> o
+    SET @s = REPLACE(@s, NCHAR(245), N'o');  -- õ -> o
+    SET @s = REPLACE(@s, NCHAR(246), N'o');  -- ö -> o
+    SET @s = REPLACE(@s, NCHAR(249), N'u');  -- ù -> u
+    SET @s = REPLACE(@s, NCHAR(250), N'u');  -- ú -> u
+    SET @s = REPLACE(@s, NCHAR(251), N'u');  -- û -> u
+    SET @s = REPLACE(@s, NCHAR(252), N'u');  -- ü -> u
+    SET @s = REPLACE(@s, NCHAR(253), N'y');  -- ý -> y
+    SET @s = REPLACE(@s, NCHAR(255), N'y');  -- ÿ -> y
+    SET @s = REPLACE(@s, NCHAR(257), N'a');  -- ā -> a
+    SET @s = REPLACE(@s, NCHAR(259), N'a');  -- ă -> a
+    SET @s = REPLACE(@s, NCHAR(261), N'a');  -- ą -> a
+    SET @s = REPLACE(@s, NCHAR(263), N'c');  -- ć -> c
+    SET @s = REPLACE(@s, NCHAR(265), N'c');  -- ĉ -> c
+    SET @s = REPLACE(@s, NCHAR(267), N'c');  -- ċ -> c
+    SET @s = REPLACE(@s, NCHAR(269), N'c');  -- č -> c
+    SET @s = REPLACE(@s, NCHAR(271), N'd');  -- ď -> d
+    SET @s = REPLACE(@s, NCHAR(275), N'e');  -- ē -> e
+    SET @s = REPLACE(@s, NCHAR(277), N'e');  -- ĕ -> e
+    SET @s = REPLACE(@s, NCHAR(279), N'e');  -- ė -> e
+    SET @s = REPLACE(@s, NCHAR(281), N'e');  -- ę -> e
+    SET @s = REPLACE(@s, NCHAR(283), N'e');  -- ě -> e
+    SET @s = REPLACE(@s, NCHAR(285), N'g');  -- ĝ -> g
+    SET @s = REPLACE(@s, NCHAR(287), N'g');  -- ğ -> g
+    SET @s = REPLACE(@s, NCHAR(289), N'g');  -- ġ -> g
+    SET @s = REPLACE(@s, NCHAR(291), N'g');  -- ģ -> g
+    SET @s = REPLACE(@s, NCHAR(293), N'h');  -- ĥ -> h
+    SET @s = REPLACE(@s, NCHAR(297), N'i');  -- ĩ -> i
+    SET @s = REPLACE(@s, NCHAR(299), N'i');  -- ī -> i
+    SET @s = REPLACE(@s, NCHAR(301), N'i');  -- ĭ -> i
+    SET @s = REPLACE(@s, NCHAR(303), N'i');  -- į -> i
+    SET @s = REPLACE(@s, NCHAR(309), N'j');  -- ĵ -> j
+    SET @s = REPLACE(@s, NCHAR(311), N'k');  -- ķ -> k
+    SET @s = REPLACE(@s, NCHAR(314), N'l');  -- ĺ -> l
+    SET @s = REPLACE(@s, NCHAR(316), N'l');  -- ļ -> l
+    SET @s = REPLACE(@s, NCHAR(318), N'l');  -- ľ -> l
+    SET @s = REPLACE(@s, NCHAR(324), N'n');  -- ń -> n
+    SET @s = REPLACE(@s, NCHAR(326), N'n');  -- ņ -> n
+    SET @s = REPLACE(@s, NCHAR(328), N'n');  -- ň -> n
+    SET @s = REPLACE(@s, NCHAR(333), N'o');  -- ō -> o
+    SET @s = REPLACE(@s, NCHAR(335), N'o');  -- ŏ -> o
+    SET @s = REPLACE(@s, NCHAR(337), N'o');  -- ő -> o
+    SET @s = REPLACE(@s, NCHAR(341), N'r');  -- ŕ -> r
+    SET @s = REPLACE(@s, NCHAR(343), N'r');  -- ŗ -> r
+    SET @s = REPLACE(@s, NCHAR(345), N'r');  -- ř -> r
+    SET @s = REPLACE(@s, NCHAR(347), N's');  -- ś -> s
+    SET @s = REPLACE(@s, NCHAR(349), N's');  -- ŝ -> s
+    SET @s = REPLACE(@s, NCHAR(351), N's');  -- ş -> s
+    SET @s = REPLACE(@s, NCHAR(353), N's');  -- š -> s
+    SET @s = REPLACE(@s, NCHAR(355), N't');  -- ţ -> t
+    SET @s = REPLACE(@s, NCHAR(357), N't');  -- ť -> t
+    SET @s = REPLACE(@s, NCHAR(361), N'u');  -- ũ -> u
+    SET @s = REPLACE(@s, NCHAR(363), N'u');  -- ū -> u
+    SET @s = REPLACE(@s, NCHAR(365), N'u');  -- ŭ -> u
+    SET @s = REPLACE(@s, NCHAR(367), N'u');  -- ů -> u
+    SET @s = REPLACE(@s, NCHAR(369), N'u');  -- ű -> u
+    SET @s = REPLACE(@s, NCHAR(371), N'u');  -- ų -> u
+    SET @s = REPLACE(@s, NCHAR(373), N'w');  -- ŵ -> w
+    SET @s = REPLACE(@s, NCHAR(375), N'y');  -- ŷ -> y
+    SET @s = REPLACE(@s, NCHAR(378), N'z');  -- ź -> z
+    SET @s = REPLACE(@s, NCHAR(380), N'z');  -- ż -> z
+    SET @s = REPLACE(@s, NCHAR(382), N'z');  -- ž -> z
+    SET @s = REPLACE(@s, NCHAR(383), N's');  -- ſ -> s
     -- 3. Remove . , ' " - and normalize whitespace chars.
     SET @s = REPLACE(@s, N'.', N'');
     SET @s = REPLACE(@s, N',', N'');

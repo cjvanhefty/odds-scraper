@@ -48,15 +48,46 @@ MIGRATION_PATH = REPO_ROOT / "schema" / "migrations" / "0001_normalization_udfs.
 # ---------------------------------------------------------------------------
 
 
-def _extract_translate_pairs(sql: str) -> tuple[str, str]:
+def _extract_diacritic_pairs(sql: str) -> list[tuple[str, str]]:
+    """Pull every stacked `SET @s = REPLACE(@s, NCHAR(cp), N'c');` pair.
+
+    Before SQL Server 2017 `TRANSLATE()` was unavailable, so the migration
+    builds its diacritic strip as a chain of REPLACE calls inside
+    fn_normalize_person_name. Each of those lines maps one lowercase
+    accented code point to one lowercase ASCII character; together they
+    mirror Python's NFKD strip.
+
+    We scope to the fn_normalize_person_name body so non-diacritic REPLACE
+    calls (punctuation, whitespace) elsewhere in the migration aren't
+    picked up.
+    """
     m = re.search(
-        r"SET\s+@s\s*=\s*TRANSLATE\(\s*@s\s*,\s*N'([^']+)'\s*,\s*\n\s*N'([^']+)'\s*\)\s*;",
+        r"CREATE FUNCTION\s+dbo\.fn_normalize_person_name.*?^END\s*$",
         sql,
-        re.S,
+        re.S | re.M,
     )
     if not m:
-        raise RuntimeError("could not find TRANSLATE() payload in migration")
-    return m.group(1), m.group(2)
+        raise RuntimeError("could not find fn_normalize_person_name body")
+    body = m.group(0)
+    pairs: list[tuple[str, str]] = []
+    for mo in re.finditer(
+        r"SET\s+@s\s*=\s*REPLACE\(\s*@s\s*,\s*NCHAR\((\d+)\)\s*,\s*N'([^']*)'\s*\)\s*;",
+        body,
+    ):
+        cp = int(mo.group(1))
+        dst = mo.group(2)
+        # Only count diacritic rows: single-char ASCII replacement for a
+        # code point in the Latin Extended range. Punctuation/whitespace
+        # REPLACEs use string sources, not NCHAR(cp), so they're filtered
+        # out naturally by the regex.
+        if cp < 0x00C0 or cp > 0x017F:
+            continue
+        if len(dst) != 1 or not dst.isascii():
+            continue
+        pairs.append((chr(cp), dst))
+    if not pairs:
+        raise RuntimeError("no diacritic REPLACE pairs found in fn_normalize_person_name")
+    return pairs
 
 
 def _extract_canonical_map(sql: str) -> dict[str, str]:
@@ -82,7 +113,7 @@ def _extract_canonical_map(sql: str) -> dict[str, str]:
 
 
 MIGRATION_SQL = MIGRATION_PATH.read_text(encoding="utf-8")
-TRANSLATE_SRC, TRANSLATE_DST = _extract_translate_pairs(MIGRATION_SQL)
+DIACRITIC_PAIRS = _extract_diacritic_pairs(MIGRATION_SQL)
 CANONICAL_MAP_FROM_SQL = _extract_canonical_map(MIGRATION_SQL)
 
 
@@ -161,14 +192,17 @@ def _sql_normalize_for_join(s: str | None) -> str:
 
 
 def _sql_normalize_person_name(n: str | None) -> str:
+    """Mirror of the SQL body. The migration lowercases first, then does a
+    chain of REPLACEs on lowercase code points, so we do the same here."""
     if n is None:
         return ""
     s = n
-    # 1. TRANSLATE using the exact pairs from the migration
-    trans = str.maketrans({src: dst for src, dst in zip(TRANSLATE_SRC, TRANSLATE_DST)})
-    s = s.translate(trans)
-    # 2. lower
+    # 1. lowercase first (matches the migration's SET @s = LOWER(@s) step)
     s = s.lower()
+    # 2. diacritic strip using the exact pairs parsed from the migration.
+    for src_ch, dst_ch in DIACRITIC_PAIRS:
+        if src_ch in s:
+            s = s.replace(src_ch, dst_ch)
     # 3. remove . , ' " - and whitespace chars
     for ch in ".,'\"-":
         s = s.replace(ch, "")
@@ -300,16 +334,22 @@ def test_migration_canonical_map_matches_python_source() -> None:
     assert CANONICAL_MAP_FROM_SQL == CANONICAL_STAT_BY_ALNUM
 
 
-def test_migration_translate_pairs_strip_to_ascii() -> None:
-    """Every TRANSLATE source char must NFKD-strip to exactly its dst char."""
+def test_migration_diacritic_pairs_strip_to_ascii() -> None:
+    """Every REPLACE(src, dst) in fn_normalize_person_name must strip via NFKD.
+
+    Each pair is (lowercase accented char, lowercase ASCII). Python's NFKD of
+    the *same-case* source character must produce the destination, so that
+    SQL's REPLACE-chain and Python's normalize_person_name agree after the
+    LOWER() step that both sides do first.
+    """
     import unicodedata
 
-    assert len(TRANSLATE_SRC) == len(TRANSLATE_DST)
-    for s, d in zip(TRANSLATE_SRC, TRANSLATE_DST):
+    assert DIACRITIC_PAIRS, "parser returned no pairs"
+    for src_ch, dst_ch in DIACRITIC_PAIRS:
         stripped = "".join(
-            c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+            c for c in unicodedata.normalize("NFKD", src_ch) if not unicodedata.combining(c)
         )
-        assert stripped == d, (hex(ord(s)), stripped, d)
+        assert stripped == dst_ch, (hex(ord(src_ch)), stripped, dst_ch)
 
 
 def test_apply_join_aliases_python_matches_sql_simulator() -> None:
