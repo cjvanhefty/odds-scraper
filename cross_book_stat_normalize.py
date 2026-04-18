@@ -3,6 +3,10 @@ Cross-provider stat normalization for PrizePicks, Underdog, and Parlay Play.
 
 - normalize_stat_basic: map API codes / short tokens to PrizePicks-style labels (for scraper ingest).
 - normalize_for_join: same labels plus internal join buckets (e.g. Blocks + Blocked Shots) for matching.
+- normalize_person_name: deterministic person-name key used by dedup (mirrors dbo.fn_normalize_person_name).
+- normalize_team_abbrev: deterministic team-abbrev key (mirrors dbo.fn_normalize_team_abbrev; alias-table
+  lookup layered on top in a later step).
+- game_natural_key: single string key for a game across books (mirrors dbo.fn_game_natural_key).
 - parlay_match_league_id_for_prizepicks: PrizePicks `league_id` -> Parlay `match.league_id` for joins.
 - parlay_match_league_id_to_prizepicks: inverse (Parlay match id -> PrizePicks id) for unified storage.
   Parlay and PP use different numbers (e.g. Parlay NBA=2 vs PP NBA=7; Parlay MLB=7 vs PP MLB=2).
@@ -12,10 +16,97 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 
 def _alnum_key(s: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").strip().lower())
+
+
+_PERSON_SUFFIXES = ("jr", "sr", "ii", "iii", "iv", "v")
+_PERSON_STRIP_PUNCT_RE = re.compile(r"[.,'\"\-]")
+_PERSON_WS_RE = re.compile(r"\s+")
+
+
+def normalize_person_name(name: str | None) -> str:
+    """Deterministic person-name key for cross-book dedup.
+
+    Mirror of ``dbo.fn_normalize_person_name``. Steps, in order:
+
+    1. NFKD-normalize, strip combining marks (so "José" -> "Jose", "Luka Dončić" -> "Luka Doncic").
+    2. Lowercase.
+    3. Remove ``.``, ``,``, ``'``, ``"``, ``-``.
+    4. Collapse whitespace.
+    5. Drop a single trailing generational suffix from {jr, sr, ii, iii, iv, v}.
+    6. Trim.
+    """
+    if not name:
+        return ""
+    s = unicodedata.normalize("NFKD", name)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = _PERSON_STRIP_PUNCT_RE.sub("", s)
+    s = _PERSON_WS_RE.sub(" ", s).strip()
+    if not s:
+        return ""
+    parts = s.split(" ")
+    if len(parts) > 1 and parts[-1] in _PERSON_SUFFIXES:
+        parts.pop()
+        s = " ".join(parts).strip()
+    return s
+
+
+def normalize_team_abbrev(abbrev: str | None, canonical_league_id: int | None = None) -> str:
+    """Deterministic team-abbrev key. Alias-table lookup (ref.team_alias) layers in later.
+
+    Mirror of ``dbo.fn_normalize_team_abbrev`` — uppercase + trim only at this step.
+    ``canonical_league_id`` is accepted so callers don't need to change when the alias
+    table arrives.
+    """
+    del canonical_league_id  # reserved for alias lookup layered on top in step 1.3
+    if not abbrev:
+        return ""
+    return abbrev.strip().upper()
+
+
+def game_natural_key(
+    canonical_league_id: int | None,
+    home_team_id: int | None,
+    away_team_id: int | None,
+    start_date: object | None,
+) -> str:
+    """Single canonical key for a game across books.
+
+    Mirror of ``dbo.fn_game_natural_key``. Format (all empties represented by the literal
+    empty string between pipes):
+
+        "{league_id}|{yyyy-mm-dd}|{home_team_id}|{away_team_id}"
+
+    ``start_date`` accepts a ``datetime.date``, ``datetime.datetime``, or any object whose
+    ``str()`` is parseable as ``YYYY-MM-DD`` (ISO prefix). Anything else becomes empty.
+    """
+    def _part(v: object | None) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    def _date_part(v: object | None) -> str:
+        if v is None:
+            return ""
+        if hasattr(v, "isoformat"):
+            try:
+                return v.isoformat()[:10]
+            except Exception:
+                pass
+        raw = str(v).strip()
+        return raw[:10] if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-" else ""
+
+    return "|".join([
+        _part(canonical_league_id),
+        _date_part(start_date),
+        _part(home_team_id),
+        _part(away_team_id),
+    ])
 
 
 def apply_join_aliases(s: str) -> str:
