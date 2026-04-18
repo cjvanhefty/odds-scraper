@@ -14,3 +14,9 @@ parlayplay_captured.json
 # Playwright browser profiles (local)
 .playwright-*/
 .playwright/
+
+# Alias-seed proposals from scripts/seed_aliases.py (reviewed, then
+# moved to schema/migrations/NNNN_seed_aliases.sql; don't track the raw
+# drops from the generator itself).
+schema/migrations/_proposals/*.sql
+!schema/migrations/_proposals/.gitkeep
