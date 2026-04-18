@@ -82,6 +82,19 @@ mostly by name + league + date.
 
 ### 1.4 Known friction / gaps
 
+- **Duplicate canonical rows across every `sportsbook_*` dimension** — the
+  biggest data-quality issue. `sportsbook_player`, `sportsbook_team`,
+  `sportsbook_stat_type`, `sportsbook_game`, `sportsbook_league`, and
+  `sportsbook_sport` all use one column per book (`prizepicks_*_id`,
+  `underdog_*_id`, `parlay_play_*_id`) with filtered unique indexes. Because
+  each book emits multiple external ids for the same real-world thing (e.g.
+  PrizePicks has a separate `player_id` per full-game / 1st-half / 1st-quarter
+  variant of the same player; Underdog has `solo_game` + `appearance`
+  variants), the sync code is forced to create one canonical row per external
+  id. Result: five "LeBron James" rows, each with two of three id columns
+  NULL. The existing `_consolidate_sportsbook_player_dupes` dedup step keys on
+  exact-match `(lower(display_name), team_abbrev, jersey_number)` and silently
+  fails on any normalization drift. See section 3.0 for the fix.
 - **Dimension FKs are soft.** `sportsbook_projection` stores `player_name`,
   `team`, `league_id`, `event_name` as denormalized text. Joins in the API and
   `vw_*` views fall back to fuzzy name matches (see `_group_player_projections`).
@@ -125,6 +138,144 @@ Two narrow, verifiable goals for this initiative:
 ---
 
 ## 3. Proposed database changes
+
+### 3.0 Eliminate duplicate rows in `sportsbook_*` dimension tables (top priority)
+
+**Problem (observed):** the `sportsbook_player` table contains multiple rows for
+the same real-world player — e.g., five "LeBron James" rows: one per PrizePicks
+variant (full game / 1H / 1Q / …), one for Underdog, one for ParlayPlay. Each
+row has at most one of `prizepicks_player_id`, `underdog_player_id`,
+`parlay_play_player_id` populated and the other two are NULL. The same bug
+exists for `sportsbook_team`, `sportsbook_stat_type`, `sportsbook_game`,
+`sportsbook_league`, and `sportsbook_sport`.
+
+**Root cause** (confirmed from `sportsbook_dimension_sync.py` +
+`schema/sportsbook_player.sql` + `schema/sportsbook_player_xref.sql`):
+
+1. **Schema models each book as a single column.** `sportsbook_player` has
+   three direct book-id columns, each with a unique filtered index
+   (`UQ_sportsbook_player_pp`, `UQ_sportsbook_player_ud`,
+   `UQ_sportsbook_player_parlay`). This enforces *at most one row per external
+   id per book*, which is fine, but combined with the fact that books emit
+   multiple ids per person (see below), it forces duplicate canonical rows.
+2. **PrizePicks emits many `player_id`s per real person.** Quarter / half /
+   full-game variants live in `prizepicks_player` as separate rows with
+   distinct `player_id` but a shared stable `ppid`. The sync code tries to
+   detect this via `ppid`, but only after a new canonical row has usually
+   already been created.
+3. **A parallel N:1 table already exists but isn't authoritative.**
+   `sportsbook_player_xref(sportsbook, external_player_id)
+   → sportsbook_player_id` is designed to map many external ids to one
+   canonical row, and the code does write to it for PrizePicks. The
+   `sportsbook_player.*_player_id` columns are still filled in parallel,
+   though, so the two stores can disagree and both get written to by different
+   code paths.
+4. **Deduplication is keyed on fragile fields.**
+   `_consolidate_sportsbook_player_dupes` merges using
+   `(LOWER(display_name), team_abbrev, jersey_number)` — any drift in name
+   punctuation ("LeBron James" vs "Lebron James Jr."), team abbreviation
+   (trade-day mismatch), or missing jersey number splits the group.
+5. **Same pattern on every other dimension.** `sportsbook_team`,
+   `sportsbook_stat_type`, `sportsbook_game`, `sportsbook_league`, and
+   `sportsbook_sport` all have the same "one column per book" shape and the
+   same duplication risk when any book emits multiple ids per thing (Underdog
+   solo games, PrizePicks stat variants like "Points" vs "Points (Combo)",
+   etc.).
+
+**Target model:** the xref table is the right pattern; we extend it everywhere
+and retire the per-book columns on the canonical tables.
+
+- `dbo.sportsbook_player`                     ← one row per real person per league
+- `dbo.sportsbook_player_xref (sportsbook, external_player_id) → sportsbook_player_id`
+  ← already exists; becomes the only place book-specific ids live.
+- `dbo.sportsbook_team_xref`                  ← new, same shape
+- `dbo.sportsbook_stat_type_xref`             ← new, same shape
+- `dbo.sportsbook_game_xref`                  ← new, same shape
+- `dbo.sportsbook_league_xref`                ← new, same shape
+- `dbo.sportsbook_sport_xref`                 ← new, same shape
+
+Each xref row also carries an `external_id_kind` column (e.g. `'player_id'`,
+`'ppid'`, `'pickem_id'`) so the same book can legitimately register multiple
+id namespaces per canonical row without loss (we already prefix these strings
+today — this just formalizes it).
+
+**Write path rule (enforced by code + a CHECK constraint later):**
+
+> Scrapers / sync never reference `sportsbook_player.prizepicks_player_id`
+> etc. directly. They *always* resolve via `sportsbook_player_xref`, and if no
+> match exists they run the resolver and only then create a canonical row.
+
+### 3.0.1 Name / key normalization (the piece that makes dedup reliable)
+
+Add MSSQL UDFs callable from both T-SQL merges and the Python sync:
+
+- `dbo.fn_normalize_person_name(@n nvarchar(255))` → nvarchar(255)
+  - lowercase, NFKD-strip accents, remove `.`, `'`, `"`, `,`, `-`,
+    collapse whitespace, strip trailing suffixes
+    `{jr, sr, ii, iii, iv, v}`. (Python mirror:
+    `cross_book_stat_normalize.normalize_person_name` — new.)
+- `dbo.fn_normalize_team_abbrev(@a nvarchar(20))` — uppercase + alias map
+  (e.g. `'LA' → 'LAL'` for NBA when league is known, `'NOP' = 'NO'`).
+- `dbo.fn_normalize_stat_basic(@s nvarchar(120))` — wrap the existing Python
+  `normalize_for_join` as a UDF so it can be used in T-SQL dedup keys.
+- `dbo.fn_game_natural_key(@league_id, @home_tid, @away_tid, @start_date)`
+  — single canonical key for a game across books.
+
+Alias lookup tables (versionable, testable) live under `ref`:
+
+- `ref.team_alias(canonical_league_id, source, alias, canonical_team_id)`
+- `ref.stat_alias(canonical_sport_id, source, alias, canonical_stat_type_id)`
+
+### 3.0.2 Canonical unique keys (after normalization)
+
+Replace the current dedup keys with stable natural keys, per table:
+
+| Table                     | Natural key (after normalization)                                       |
+|---------------------------|-------------------------------------------------------------------------|
+| `sportsbook_sport`        | `display_name_normalized`                                                |
+| `sportsbook_league`       | `(canonical_league_id)` OR `(sportsbook_sport_id, display_name_normalized)` |
+| `sportsbook_team`         | `(canonical_league_id, abbrev_normalized)` with name fallback            |
+| `sportsbook_player`       | `(canonical_league_id, person_name_normalized, team_abbrev_normalized)`  |
+| `sportsbook_stat_type`    | `(sportsbook_sport_id, canonical_stat_key)`                               |
+| `sportsbook_game`         | `(canonical_league_id, game_date_central, home_team_id, away_team_id)`   |
+
+Each gets a computed-column unique index (`PERSISTED`, filtered on
+`IS NOT NULL`) so the DB itself prevents future duplicates.
+
+### 3.0.3 One-time consolidation migration
+
+Written as a numbered migration (`0001_consolidate_sportsbook_dimensions.sql`)
+that is **idempotent and re-runnable**, and runs in this order:
+
+1. Create the new xref tables for team / stat_type / game / league / sport.
+2. Backfill each xref from the existing per-book columns
+   (`sportsbook_team.{parlay_play_team_id,underdog_team_id,...}`, etc.).
+3. Compute normalized columns on every row.
+4. For each dimension table, pick a survivor per natural key (lowest id),
+   `COALESCE` all other rows' attributes onto it, repoint xref rows and
+   every downstream FK (`sportsbook_projection`, `sportsbook_projection_history`,
+   `sportsbook_game.home_sportsbook_team_id/away_sportsbook_team_id`, etc.),
+   then delete the losers.
+5. Add the computed-column unique indexes from 3.0.2.
+6. Deprecate the per-book columns — keep them for one release so external
+   callers don't break, but have them populated by a trigger that just reads
+   from the xref ("preferred book id" = min by sort order).
+
+### 3.0.4 Reconfigured sync logic
+
+`sportsbook_dimension_sync.py` changes:
+
+- All `_sync_*` functions switch to "xref-first": look up via xref, create a
+  canonical row only when no xref hit *and* no natural-key match. Current
+  code is already close for `_sync_player` PrizePicks path; extend to
+  Underdog, ParlayPlay, and to the other dimensions.
+- `_consolidate_sportsbook_player_dupes` is replaced by a generic
+  `_consolidate_sportsbook_dimension_dupes(table)` that uses the normalized
+  natural key from 3.0.2 — it continues to run each sync cycle as a safety net,
+  but in the steady state finds zero dupes.
+- Emit a metric `sportsbook_dim_dupes_merged_total{table}` so we can alert when
+  dedup picks up work (signals a missed alias, a broken normalization, or new
+  scraper behavior).
 
 ### 3.1 Schema-level
 
@@ -348,15 +499,32 @@ Only needed for the update endpoints and saved data.
 Listed by dependency order. No time estimates — each step is a separate PR and
 each is independently revertible.
 
-### 6.1 Phase 1 — foundations (no user-visible changes)
+### 6.1 Phase 1 — foundations + deduplicate dimension tables (no user-visible changes)
 
-1. Add `dbo.schema_migrations` + a Python runner (`scripts/migrate.py`).
-   Wrap all existing `schema/*.sql` idempotent scripts as migration
+1. Add `dbo.schema_migrations` + a Python runner (`scripts/migrate.py`). Wrap
+   all existing `schema/*.sql` idempotent scripts as migration
    `0000_baseline.sql`.
-2. Move staging-only tables into a new `stage` schema via a migration that
+2. **Fix duplicate canonical rows (section 3.0)** — the first visible
+   improvement:
+   1. Create normalization UDFs (`fn_normalize_person_name`,
+      `fn_normalize_team_abbrev`, `fn_normalize_stat_basic`,
+      `fn_game_natural_key`) and their Python mirrors.
+   2. Create `sportsbook_{team,stat_type,game,league,sport}_xref` tables.
+   3. Create `ref.team_alias` and `ref.stat_alias` alias lookup tables, seeded
+      from known trouble cases.
+   4. Run the consolidation migration
+      (`0001_consolidate_sportsbook_dimensions.sql`) that backfills xrefs,
+      merges survivors, repoints downstream FKs, and adds the computed-column
+      unique indexes listed in 3.0.2.
+   5. Reshape `sportsbook_dimension_sync.py` to xref-first resolution and
+      generic dedup; keep the per-book columns writable by trigger for one
+      release.
+   6. Add a lightweight integrity check (`scripts/check_dimension_dupes.py`)
+      that fails CI when any `sportsbook_*` table has more than one row per
+      natural key.
+3. Move staging-only tables into a new `stage` schema via a migration that
    renames or creates synonyms for backward compatibility.
-3. Create `dbo.fn_normalize_stat_basic` (MSSQL UDF) and migrate
-   `sportsbook_stat_type.canonical_stat_key`.
+4. Migrate `sportsbook_stat_type.canonical_stat_key` off the UDF from step 2.
 
 ### 6.2 Phase 2 — canonical ids on facts
 
