@@ -176,14 +176,43 @@ def _sql_normalize_stat_basic(s: str | None) -> str:
     return t if mapped is None else mapped
 
 
-def _sql_normalize_for_join(s: str | None) -> str:
+def _sql_ne_ci(a: str, b: str) -> bool:
+    """Simulate SQL Server's default case-insensitive accent-insensitive <>.
+
+    Most MSSQL deployments (including the Props DB) use a CI collation as
+    the default, so `N'Shots On Target' <> N'Shots on Target'` returns
+    FALSE in T-SQL even though Python's `!=` returns True. Any UDF that
+    uses `<>` to distinguish "alias applied" from "alias didn't apply"
+    must either use a binary collation (COLLATE Latin1_General_BIN2) or
+    accept CI semantics.
+
+    fn_normalize_for_join in migration 0002 uses the binary collation
+    explicitly. The simulator here models the DEFAULT collation so we can
+    write a regression test asserting the SIM without the binary COLLATE
+    would have reproduced the operator-reported bug, and that with it,
+    it doesn't.
+    """
+    return a.casefold() != b.casefold()
+
+
+def _sql_normalize_for_join(s: str | None, *, use_binary_collation: bool = True) -> str:
+    """Simulator for fn_normalize_for_join.
+
+    use_binary_collation=True mirrors the fix in migration 0002 (the
+    production behavior). use_binary_collation=False mirrors the buggy
+    pre-fix behavior under a CI collation, used by
+    test_normalize_for_join_regresses_without_binary_collation below.
+    """
     if s is None:
         return ""
     t = s.strip()
     if not t:
         return ""
     pre = _sql_apply_join_aliases(t)
-    if pre != t:
+    # Binary (case-sensitive) comparison matches SQL's
+    # '@pre <> @trimmed COLLATE Latin1_General_BIN2'.
+    differs = (pre != t) if use_binary_collation else _sql_ne_ci(pre, t)
+    if differs:
         return pre
     mapped = _sql_canonical_stat_by_alnum(_sql_alnum_key(t))
     if mapped is None:
@@ -350,6 +379,26 @@ def test_migration_diacritic_pairs_strip_to_ascii() -> None:
             c for c in unicodedata.normalize("NFKD", src_ch) if not unicodedata.combining(c)
         )
         assert stripped == dst_ch, (hex(ord(src_ch)), stripped, dst_ch)
+
+
+def test_normalize_for_join_regresses_without_binary_collation() -> None:
+    """Regression guard for the 'Shots on Target' bug fixed in migration 0002.
+
+    Under the default CI collation (simulated by use_binary_collation=False),
+    fn_normalize_for_join('Shots on Target') returns the trimmed input
+    unchanged instead of the aliased 'Shots On Target', because the
+    `@pre <> @trimmed` comparison collapses case differences. This test
+    asserts both that the buggy simulator reproduces the bug *and* that
+    the fixed simulator does not, so a future edit that removes the
+    binary COLLATE clause would break this test before hitting prod.
+    """
+    buggy = _sql_normalize_for_join("Shots on Target", use_binary_collation=False)
+    fixed = _sql_normalize_for_join("Shots on Target", use_binary_collation=True)
+    assert buggy == "Shots on Target", (
+        "expected the CI-collation simulator to reproduce the original bug "
+        f"('Shots on Target' unchanged); got {buggy!r}"
+    )
+    assert fixed == "Shots On Target"
 
 
 def test_apply_join_aliases_python_matches_sql_simulator() -> None:
