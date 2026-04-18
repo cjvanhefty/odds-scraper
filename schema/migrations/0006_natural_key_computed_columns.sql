@@ -110,10 +110,16 @@ IF OBJECT_ID(N'[dbo].[sportsbook_team]', N'U') IS NOT NULL
           AND object_id = OBJECT_ID(N'dbo.sportsbook_team')
    )
 BEGIN
+    -- Filter on source columns, not on abbrev_normalized: SQL Server error
+    -- 10609 forbids referencing computed columns in a filtered-index WHERE.
+    -- abbrev_normalized is non-empty exactly when abbreviation is non-empty
+    -- (fn_normalize_team_abbrev returns N'' only for NULL/empty input), so
+    -- this filter admits exactly the same row set.
     CREATE UNIQUE NONCLUSTERED INDEX [UQ_sportsbook_team_league_abbrev_norm]
         ON [dbo].[sportsbook_team]([canonical_league_id], [abbrev_normalized])
         WHERE [canonical_league_id] IS NOT NULL
-          AND [abbrev_normalized] IS NOT NULL;
+          AND [abbreviation] IS NOT NULL
+          AND [abbreviation] <> N'';
 END
 GO
 
@@ -187,11 +193,20 @@ IF OBJECT_ID(N'[dbo].[sportsbook_player]', N'U') IS NOT NULL
           AND object_id = OBJECT_ID(N'dbo.sportsbook_player')
    )
 BEGIN
+    -- Filter on source columns only (see team note above). We exclude
+    -- NULL/blank team_abbrev rows from the unique index for two reasons:
+    -- (1) many legacy rows have NULL team_abbrev and they'd all collide
+    --     on (league, name, N''); and
+    -- (2) LEN(col) and other functions on columns are forbidden in a
+    --     filtered-index predicate (error 10609 / 12315).
+    -- Simple '<>' against a constant is allowed and filters blanks out.
     CREATE UNIQUE NONCLUSTERED INDEX [UQ_sportsbook_player_natural_key]
         ON [dbo].[sportsbook_player]([canonical_league_id], [display_name_normalized], [team_abbrev_normalized])
         WHERE [canonical_league_id] IS NOT NULL
-          AND [display_name_normalized] IS NOT NULL
-          AND LEN([display_name_normalized]) > 0;
+          AND [display_name] IS NOT NULL
+          AND [display_name] <> N''
+          AND [team_abbrev] IS NOT NULL
+          AND [team_abbrev] <> N'';
 END
 GO
 
@@ -260,11 +275,16 @@ IF OBJECT_ID(N'[dbo].[sportsbook_game]', N'U') IS NOT NULL
           AND object_id = OBJECT_ID(N'dbo.sportsbook_game')
    )
 BEGIN
+    -- Filter on the source columns that make natural_key fully populated.
+    -- fn_game_natural_key concatenates '{league}|{date}|{home}|{away}' and
+    -- leaves any NULL/unparseable part empty between pipes, so we require
+    -- all four parts here. This matches the dupe-count pre-flight above.
     CREATE UNIQUE NONCLUSTERED INDEX [UQ_sportsbook_game_natural_key]
         ON [dbo].[sportsbook_game]([natural_key])
         WHERE [canonical_league_id] IS NOT NULL
-          AND [natural_key] IS NOT NULL
-          AND LEN([natural_key]) > 0;
+          AND [start_time] IS NOT NULL
+          AND [home_sportsbook_team_id] IS NOT NULL
+          AND [away_sportsbook_team_id] IS NOT NULL;
 END
 GO
 
@@ -314,10 +334,13 @@ IF OBJECT_ID(N'[dbo].[sportsbook_stat_type]', N'U') IS NOT NULL
           AND object_id = OBJECT_ID(N'dbo.sportsbook_stat_type')
    )
 BEGIN
+    -- normalized_stat_key is a plain NVARCHAR column (not computed), so
+    -- direct reference in the filter is allowed. LEN() is still banned
+    -- in filtered-index predicates, so we use '<> N''''' instead.
     CREATE UNIQUE NONCLUSTERED INDEX [UQ_sportsbook_stat_type_league_norm_key]
         ON [dbo].[sportsbook_stat_type]([canonical_league_id], [normalized_stat_key])
         WHERE [canonical_league_id] IS NOT NULL
           AND [normalized_stat_key] IS NOT NULL
-          AND LEN([normalized_stat_key]) > 0;
+          AND [normalized_stat_key] <> N'';
 END
 GO
