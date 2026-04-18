@@ -242,16 +242,52 @@ GO
 
 def person_name_body() -> str:
     src, dst = _build_translate_pairs()
+    # Emit one REPLACE call per distinct (src_char, dst_char) pair so this
+    # migration works on SQL Server 2016 and earlier (TRANSLATE is 2017+).
+    # We lowercase first so both the uppercase ('É') and lowercase ('é') forms
+    # collapse to a single lowercase ASCII replacement, halving the REPLACE
+    # count. The resulting stacked expression is ugly but deterministic and
+    # runs on every supported SQL Server version.
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for s, d in zip(src, dst):
+        s_lower = s.lower()
+        d_lower = d.lower()
+        if len(s_lower) != 1 or len(d_lower) != 1:
+            # Some accented characters (e.g. U+0130 LATIN CAPITAL LETTER I
+            # WITH DOT ABOVE) lowercase to multiple chars under the Unicode
+            # default case-fold. Those can't be expressed as a single
+            # REPLACE(NCHAR(cp), ...) call and are rare enough in our
+            # player feeds to skip — if one shows up it just stays
+            # unchanged, matching the Python behavior after LOWER()
+            # introduces the same expansion.
+            continue
+        key = (s_lower, d_lower)
+        if key in seen:
+            continue
+        seen.add(key)
+        pairs.append(key)
+
+    replace_lines = []
+    for s, d in pairs:
+        replace_lines.append(
+            f"    SET @s = REPLACE(@s, NCHAR({ord(s)}), N'{d}');  -- {s} -> {d}"
+        )
+    replace_block = "\n".join(replace_lines)
+
     return f"""\
 -- dbo.fn_normalize_person_name(@n)
 -- Mirror of Python normalize_person_name. Steps, in order:
---   1. Strip diacritics on common Latin-1/Extended-A accented characters via TRANSLATE.
---      The TRANSLATE source/destination strings are auto-generated from
---      unicodedata.normalize('NFKD', ch) for cp in [0x00C0..0x017F] where the
---      stripped form is exactly one ASCII character. Characters whose NFKD
---      strip is a no-op (e.g. O-slash, lowercase L-stroke) are intentionally
---      omitted here so SQL leaves them alone, matching Python.
---   2. Lowercase.
+--   1. Lowercase.
+--   2. Strip diacritics on common Latin-1/Extended-A accented characters
+--      via stacked REPLACE(@s, NCHAR(cp), 'ascii'). TRANSLATE would be
+--      cleaner but is SQL Server 2017+; this works on 2016 and earlier.
+--      The (code point, ascii) pairs are auto-generated from
+--      unicodedata.normalize('NFKD', ch) for cp in [0x00C0..0x017F] where
+--      the stripped form is exactly one ASCII character. Characters whose
+--      NFKD strip is a no-op (O-slash, stroked L, dotless i, long s)
+--      are intentionally omitted so SQL leaves them alone, matching
+--      Python's NFKD behavior.
 --   3. Remove ., , ' " - and treat tab/CR/LF as spaces.
 --   4. Collapse consecutive spaces (stacked REPLACE handles up to 16 in a run).
 --   5. Trim.
@@ -266,12 +302,10 @@ AS
 BEGIN
     IF @n IS NULL RETURN N'';
     DECLARE @s nvarchar(300) = @n;
-    -- 1. Diacritic strip (auto-generated: {len(src)} chars).
-    SET @s = TRANSLATE(@s,
-        {_sql_unicode_literal(src)},
-        {_sql_unicode_literal(dst)});
-    -- 2. Lowercase.
+    -- 1. Lowercase first so we only need one REPLACE per lowercase code point.
     SET @s = LOWER(@s);
+    -- 2. Diacritic strip ({len(pairs)} pairs, auto-generated from unicodedata).
+{replace_block}
     -- 3. Remove . , ' " - and normalize whitespace chars.
     SET @s = REPLACE(@s, N'.', N'');
     SET @s = REPLACE(@s, N',', N'');
