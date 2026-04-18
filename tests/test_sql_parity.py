@@ -39,6 +39,7 @@ from cross_book_stat_normalize import (
 
 FIXTURES_PATH = REPO_ROOT / "tests" / "fixtures" / "normalization.json"
 MIGRATION_PATH = REPO_ROOT / "schema" / "migrations" / "0001_normalization_udfs.sql"
+REF_ALIASES_MIGRATION_PATH = REPO_ROOT / "schema" / "migrations" / "0003_ref_alias_tables.sql"
 
 
 # ---------------------------------------------------------------------------
@@ -90,19 +91,15 @@ def _extract_diacritic_pairs(sql: str) -> list[tuple[str, str]]:
     return pairs
 
 
-def _extract_canonical_map(sql: str) -> dict[str, str]:
-    """Pull only the VALUES rows from inside fn_canonical_stat_by_alnum.
+def _extract_canonical_map_from_values(sql: str) -> dict[str, str]:
+    """Pull VALUES rows from inside fn_canonical_stat_by_alnum.
 
-    The function body looks like::
-
-        FROM (VALUES
-            (N'pts', N'Points'),
-            (N'points', N'Points'),
-            ...
-        ) AS m(k, v)
-
-    We lock onto that block so we don't pick up IN-list pairs elsewhere in
-    the migration (e.g. inside fn_apply_join_aliases).
+    Used against migration 0001. After migration 0003 ships, the function
+    body no longer contains a VALUES block (it reads from ref.stat_alias),
+    and the canonical map comes from `_extract_canonical_map_from_seed`
+    instead. The test below prefers the seed extractor when 0003 is
+    present and falls back to this one otherwise, so the parity harness
+    works whether or not 0003 has been generated.
     """
     m = re.search(r"FROM\s*\(\s*VALUES\s*(.+?)\s*\)\s*AS\s+m\(k,\s*v\)", sql, re.S | re.I)
     if not m:
@@ -112,9 +109,44 @@ def _extract_canonical_map(sql: str) -> dict[str, str]:
     return {k.replace("''", "'"): v.replace("''", "'") for k, v in rows}
 
 
+def _extract_canonical_map_from_seed(sql: str) -> dict[str, str]:
+    """Pull the (source, alias_alnum_key, canonical_label) seed rows from
+    migration 0003. Only rows with source=='_any' are returned -- they are
+    the mirror of CANONICAL_STAT_BY_ALNUM. Per-book rows (when they
+    exist) don't round-trip to that dict.
+    """
+    m = re.search(
+        r"WITH\s+seed\s*\(\s*source\s*,\s*alias_alnum_key\s*,\s*canonical_label\s*\)\s*AS\s*\(\s*SELECT\s*\*\s*FROM\s*\(\s*VALUES\s*(.+?)\s*\)\s*AS\s+v",
+        sql,
+        re.S | re.I,
+    )
+    if not m:
+        raise RuntimeError("could not find ref.stat_alias seed VALUES block")
+    body = m.group(1)
+    rows = re.findall(
+        r"\(\s*N'((?:[^']|'')*)'\s*,\s*N'((?:[^']|'')*)'\s*,\s*N'((?:[^']|'')*)'\s*\)",
+        body,
+    )
+    out: dict[str, str] = {}
+    for source, alias_key, canonical in rows:
+        if source != "_any":
+            continue
+        out[alias_key.replace("''", "'")] = canonical.replace("''", "'")
+    return out
+
+
 MIGRATION_SQL = MIGRATION_PATH.read_text(encoding="utf-8")
 DIACRITIC_PAIRS = _extract_diacritic_pairs(MIGRATION_SQL)
-CANONICAL_MAP_FROM_SQL = _extract_canonical_map(MIGRATION_SQL)
+
+# Prefer the seed in 0003 as the authoritative source of the canonical map
+# once that migration exists. This mirrors production: after 0003 is
+# applied, dbo.fn_canonical_stat_by_alnum reads from ref.stat_alias.
+if REF_ALIASES_MIGRATION_PATH.exists():
+    REF_ALIASES_SQL = REF_ALIASES_MIGRATION_PATH.read_text(encoding="utf-8")
+    CANONICAL_MAP_FROM_SQL = _extract_canonical_map_from_seed(REF_ALIASES_SQL)
+else:
+    REF_ALIASES_SQL = ""
+    CANONICAL_MAP_FROM_SQL = _extract_canonical_map_from_values(MIGRATION_SQL)
 
 
 # ---------------------------------------------------------------------------
