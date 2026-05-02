@@ -177,3 +177,51 @@ two checks that matter.
   accepted long-term direction is in `docs/database_and_app_plan.md`.
 - Any reference in older docs to SQLite or a `backend/` directory.
   This project has never used SQLite.
+
+## Cursor Cloud specific instructions
+
+### System dependencies (pre-installed in VM snapshot)
+
+- **ODBC Driver 17 for SQL Server** (`msodbcsql17`) and `unixodbc-dev`
+  are required for `pyodbc`. These are installed via the Microsoft apt
+  repo for Ubuntu 24.04 (noble).
+- Python 3.12 (system default) is used. The executable is `python3`,
+  not `python`.
+
+### Running the dev server
+
+```bash
+python3 -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+The app starts and serves the frontend at `/` and Swagger docs at
+`/docs` even without a live SQL Server connection. API endpoints that
+query the database (`/api/projections`, `/api/players`, etc.) will
+return 500 errors until DB credentials are configured in `.env`.
+
+### Running tests
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+Tests are fully offline — they validate Python normalization helpers and
+SQL parity via fixture files. No database or network access is needed.
+
+### Database requirement
+
+All data-dependent features (API queries, scrapers, migrations) require
+a live Microsoft SQL Server instance with the `Props` database. The
+cloud VM does not include SQL Server. To test DB-dependent features,
+set `PROPS_DB_SERVER`, `PROPS_DB_USER`, and `PROPS_DB_PASSWORD` in
+`.env` pointing to an external SQL Server, or set
+`PROPS_DB_USE_TRUSTED_CONNECTION=1` for Windows auth (not applicable in
+Linux cloud VMs).
+
+### Debian system package conflicts
+
+When running `pip install -r requirements.txt`, some Debian-managed
+packages (PyYAML, pip, packaging, wheel, etc.) may block installation
+with "Cannot uninstall … RECORD file not found". The update script
+handles this by running `pip install --ignore-installed` for those
+packages first.
